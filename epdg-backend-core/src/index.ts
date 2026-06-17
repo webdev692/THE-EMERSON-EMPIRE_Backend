@@ -18,6 +18,7 @@ import authRoutes   from './routes/authRoutes';
 import adminRoutes  from './routes/adminRoutes';
 import internRoutes from './routes/internRoutes';
 import uploadRoutes from './routes/uploadRoutes';
+import userRoutes   from './routes/userRoutes';
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -54,7 +55,8 @@ app.use('/api/auth',   authLimiter, authRoutes);
 app.use('/api/admin',  adminRoutes);
 app.use('/api/intern', internRoutes);
 app.use('/api/onboarding', internRoutes);
-app.use('/api/upload', uploadRoutes); 
+app.use('/api/upload', uploadRoutes);
+app.use('/api/users',  userRoutes);
 
 // --- Error Handling ---
 app.use(errorHandler);

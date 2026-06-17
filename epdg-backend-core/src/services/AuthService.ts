@@ -278,7 +278,8 @@ export class AuthService {
       { expiresIn: '30m' }
     );
 
-    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}`;
+    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+    const resetUrl = `${frontendBase}/reset-password?token=${resetToken}`;
 
     logger.warn(`Dev mode — password reset URL: ${resetUrl}`);
 
@@ -364,7 +365,7 @@ export class AuthService {
   }
 
   private async sendVerificationEmail(email: string, token: string): Promise<void> {
-    const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email?token=${token}`;
+    const verificationUrl = `${(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '')}/verify-email?token=${token}`;
 
     const { data, error } = await getResend().emails.send({
       from: process.env.SMTP_FROM || 'onboarding@resend.dev',

@@ -8,7 +8,7 @@ const extraOrigins = process.env.CORS_ORIGINS
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
-  "https://emersonproffesionaldevelopment.netlify.app",
+  "https://epdg.netlify.app/ ",
   ...extraOrigins,
 ];
 

@@ -109,7 +109,15 @@ export class AuthService {
 
   async login(email: string, password: string, role: string): Promise<{
     token: string;
-    user: { id: number; name: string; email: string; role: string; status: string };
+    user: {
+      id: number;
+      name: string;
+      email: string;
+      role: string;
+      status: string;
+      is_mentor: boolean;
+      force_password_change: boolean;
+    };
   }> {
     const pool = getPool();
 

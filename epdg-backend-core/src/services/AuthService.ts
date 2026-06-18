@@ -1,6 +1,6 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
 import { Resend } from 'resend';
@@ -49,7 +49,7 @@ export class AuthService {
       }
 
       const hashedPassword = await bcrypt.hash(data.password, SALT_ROUNDS);
-      const verificationToken = uuidv4();
+      const verificationToken = randomUUID();
       const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
       const userResult = await client.query(
@@ -244,7 +244,7 @@ export class AuthService {
       return { message: 'Email is already verified' };
     }
 
-    const verificationToken = uuidv4();
+    const verificationToken = randomUUID();
     const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     await pool.query(

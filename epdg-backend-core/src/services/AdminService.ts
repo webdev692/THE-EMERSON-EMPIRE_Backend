@@ -1,5 +1,15 @@
 import bcrypt from 'bcrypt';
+import { Resend } from 'resend';
 import { getPool } from '../db';
+import { logger } from '../utils/logger';
+
+function getResend() {
+  if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY not set');
+  return new Resend(process.env.RESEND_API_KEY);
+}
+
+const FROM = () => process.env.SMTP_FROM || 'noreply@theemersonempire.info';
+const FRONTEND = () => (process.env.FRONTEND_URL || 'https://epdg.netlify.app').replace(/\/$/, '');
 
 export class AdminService {
 
@@ -147,6 +157,29 @@ export class AdminService {
 
       await client.query('COMMIT');
 
+      // Fire-and-forget notification email
+      const emailRow = await pool.query(
+        'SELECT email FROM users WHERE id = $1',
+        [userId]
+      );
+      if (emailRow.rows.length) {
+        if (payload.status === 'approved') {
+          this.sendApprovalEmail(
+            emailRow.rows[0].email,
+            user.name,
+            user.role,
+            payload.department,
+            payload.mentor
+          );
+        } else {
+          this.sendRejectionEmail(
+            emailRow.rows[0].email,
+            user.name,
+            payload.rejection_reason || ''
+          );
+        }
+      }
+
       // Return updated normalised user
       const updated = await pool.query(`
         SELECT u.*, ip.is_approved AS intern_approved, c.is_approved AS company_approved, s.is_approved AS school_approved,
@@ -248,6 +281,10 @@ export class AdminService {
       );
 
       await client.query('COMMIT');
+
+      // Fire-and-forget welcome email with temporary password
+      this.sendMentorWelcomeEmail(data.email, data.name, data.password, data.department);
+
       return {
         id:             user.id,
         name:           data.name,
@@ -474,6 +511,108 @@ export class AdminService {
         [reason, user.id]
       );
     }
+  }
+
+  // ─── Email helpers ───────────────────────────────────────────────────────────
+
+  private sendApprovalEmail(to: string, name: string, role: string, department?: string, mentor?: string) {
+    const loginUrl = `${FRONTEND()}/login`;
+    const body = `
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        Congratulations <strong>${name}</strong>! Your application as a <strong>${role}</strong>
+        on the Emerson Professional Development platform has been <strong style="color:#16a34a;">approved</strong>.
+      </p>
+      ${department ? `<p style="font-size:14px;color:#555;">📌 Department: <strong>${department}</strong></p>` : ''}
+      ${mentor     ? `<p style="font-size:14px;color:#555;">👤 Assigned Mentor: <strong>${mentor}</strong></p>` : ''}
+      <p style="font-size:14px;color:#555;">You can now log in and start your journey.</p>
+      <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
+        <tr><td style="background:#4B1E91;border-radius:8px;">
+          <a href="${loginUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            Log In Now
+          </a>
+        </td></tr>
+      </table>
+    `;
+    this.sendMail(to, '🎉 Application Approved — Emerson Professional', body).catch((e) =>
+      logger.error('approval email failed', e)
+    );
+  }
+
+  private sendRejectionEmail(to: string, name: string, reason: string) {
+    const body = `
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        Hi <strong>${name}</strong>, thank you for applying to the Emerson Professional Development platform.
+      </p>
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        After review, your application was <strong style="color:#dc2626;">not approved</strong> at this time.
+      </p>
+      ${reason ? `
+      <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:4px;margin:20px 0;">
+        <p style="margin:0;font-size:14px;color:#7f1d1d;"><strong>Reason:</strong> ${reason}</p>
+      </div>` : ''}
+      <p style="font-size:14px;color:#555;">If you believe this is in error, please contact
+        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+      </p>
+    `;
+    this.sendMail(to, 'Application Update — Emerson Professional', body).catch((e) =>
+      logger.error('rejection email failed', e)
+    );
+  }
+
+  private sendMentorWelcomeEmail(to: string, name: string, password: string, department: string) {
+    const loginUrl = `${FRONTEND()}/login`;
+    const body = `
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        Hi <strong>${name}</strong>, a mentor account has been created for you on the
+        Emerson Professional Development platform.
+      </p>
+      <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
+        <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
+        <p style="margin:12px 0 0;font-size:13px;color:#6b7280;">Department: ${department}</p>
+      </div>
+      <p style="font-size:14px;color:#dc2626;font-weight:bold;">
+        ⚠️ You will be asked to set a new password on your first login.
+      </p>
+      <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
+        <tr><td style="background:#4B1E91;border-radius:8px;">
+          <a href="${loginUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            Log In &amp; Set Password
+          </a>
+        </td></tr>
+      </table>
+    `;
+    this.sendMail(to, '👋 Welcome to Emerson — Your Mentor Account is Ready', body).catch((e) =>
+      logger.error('mentor welcome email failed', e)
+    );
+  }
+
+  private async sendMail(to: string, subject: string, bodyHtml: string) {
+    const html = `
+      <!DOCTYPE html>
+      <html><body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:40px 0;">
+          <tr><td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;">
+              <tr><td style="background:#12022A;padding:20px 40px;">
+                <h1 style="color:#ffffff;margin:0;font-size:20px;font-weight:bold;">Emerson Professional</h1>
+              </td></tr>
+              <tr><td style="padding:36px 40px;">
+                ${bodyHtml}
+                <hr style="border:none;border-top:1px solid #eee;margin:32px 0;">
+                <p style="color:#aaa;font-size:12px;margin:0;">
+                  © Emerson Professional Development Group ·
+                  <a href="mailto:support@theemersonempire.info" style="color:#aaa;">support@theemersonempire.info</a>
+                </p>
+              </td></tr>
+            </table>
+          </td></tr>
+        </table>
+      </body></html>
+    `;
+    const { error } = await getResend().emails.send({ from: FROM(), to, subject, html });
+    if (error) logger.error(`Resend error [${subject}]: ${JSON.stringify(error)}`);
   }
 
   private normalise(r: any) {

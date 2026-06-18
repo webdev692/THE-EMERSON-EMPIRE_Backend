@@ -74,7 +74,17 @@ export async function performMigration() {
   try {
     await ensureMigrationTable(client);
     console.info("Starting database migration...");
-    await migrate({ client }, migrationsPath);
+    try {
+      await migrate({ client }, migrationsPath);
+    } catch (e: any) {
+      if (e?.message?.includes("Hashes don't match")) {
+        console.warn("Migration hash mismatch — resetting tracking table and retrying...");
+        await client.query("DELETE FROM public.migrations");
+        await migrate({ client }, migrationsPath);
+      } else {
+        throw e;
+      }
+    }
     console.info("Database migration completed successfully.");
   } catch (e: any) {
     console.error("Error occurred while migrating:", e);

@@ -143,6 +143,8 @@ export class AuthService {
     );
 
     let status = 'approved';
+    let is_mentor = false;
+    let force_password_change = false;
 
     if (user.role === 'company') {
       const r = await pool.query(
@@ -168,6 +170,15 @@ export class AuthService {
       if (r.rows.length > 0 && !r.rows[0].is_approved) {
         status = r.rows[0].rejection_reason ? 'rejected' : 'pending';
       }
+    } else if (user.role === 'admin') {
+      const r = await pool.query(
+        'SELECT is_mentor, force_password_change FROM admins WHERE user_id = $1',
+        [user.id]
+      );
+      if (r.rows.length > 0) {
+        is_mentor             = r.rows[0].is_mentor             ?? false;
+        force_password_change = r.rows[0].force_password_change ?? false;
+      }
     }
 
     const token = this.generateToken(user);
@@ -180,8 +191,30 @@ export class AuthService {
         email: user.email,
         role: user.role,
         status,
+        is_mentor,
+        force_password_change,
       },
     };
+  }
+
+  async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<void> {
+    const pool = getPool();
+
+    const { rows } = await pool.query(
+      'SELECT password FROM users WHERE id = $1 AND deleted_at IS NULL',
+      [userId]
+    );
+    if (!rows.length) throw new Error('User not found');
+
+    const valid = await bcrypt.compare(currentPassword, rows[0].password);
+    if (!valid) throw new Error('Current password is incorrect');
+
+    const hashed = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, userId]);
+    await pool.query(
+      'UPDATE admins SET force_password_change = FALSE WHERE user_id = $1',
+      [userId]
+    );
   }
 
   async refreshToken(token: string): Promise<{ token: string }> {

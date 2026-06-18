@@ -137,3 +137,23 @@ export const logout = async (req: Request, res: Response) => {
     res.status(500).json({ success: false, message: error.message || 'Logout failed', errors: [] });
   }
 };
+
+export const changePassword = async (req: Request, res: Response) => {
+  try {
+    const { current_password, new_password } = req.body;
+    if (!current_password || !new_password) {
+      res.status(400).json({ success: false, message: 'current_password and new_password are required', errors: [] });
+      return;
+    }
+    if (new_password.length < 8) {
+      res.status(400).json({ success: false, message: 'New password must be at least 8 characters', errors: [] });
+      return;
+    }
+    const userId = (req as AuthRequest).user.id;
+    await authService.changePassword(userId, current_password, new_password);
+    res.json({ success: true, message: 'Password changed successfully.' });
+  } catch (error: any) {
+    const code = error.message === 'Current password is incorrect' ? 400 : 500;
+    res.status(code).json({ success: false, message: error.message, errors: [] });
+  }
+};

@@ -17,6 +17,7 @@ import { errorHandler } from './middlewares/errorHandler';
 import authRoutes   from './routes/authRoutes';
 import adminRoutes  from './routes/adminRoutes';
 import internRoutes from './routes/internRoutes';
+import mentorRoutes from './routes/mentorRoutes';
 import uploadRoutes from './routes/uploadRoutes';
 import userRoutes   from './routes/userRoutes';
 
@@ -53,6 +54,7 @@ app.get('/health', (req, res) => {
 // --- Routes ---
 app.use('/api/auth',   authLimiter, authRoutes);
 app.use('/api/admin',  adminRoutes);
+app.use('/api/mentor', mentorRoutes);
 app.use('/api/intern', internRoutes);
 app.use('/api/onboarding', internRoutes);
 app.use('/api/upload', uploadRoutes);

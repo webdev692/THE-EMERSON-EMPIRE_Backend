@@ -236,14 +236,14 @@ export class AdminService {
       const hashed = await bcrypt.hash(data.password, 10);
 
       const { rows: [user] } = await client.query(
-        `INSERT INTO users (name, email, password_hash, role, status, created_at)
-         VALUES ($1, $2, $3, 'admin', 'approved', NOW()) RETURNING id`,
+        `INSERT INTO users (name, email, password, role, is_verified, created_at)
+         VALUES ($1, $2, $3, 'admin', TRUE, NOW()) RETURNING id`,
         [data.name, data.email, hashed]
       );
 
       await client.query(
-        `INSERT INTO admins (user_id, admin_role, is_mentor, department, max_capacity, created_at)
-         VALUES ($1, 'admin', TRUE, $2, $3, NOW())`,
+        `INSERT INTO admins (user_id, admin_role, is_mentor, department, max_capacity, force_password_change, created_at)
+         VALUES ($1, 'admin', TRUE, $2, $3, TRUE, NOW())`,
         [user.id, data.department, data.max_capacity]
       );
 

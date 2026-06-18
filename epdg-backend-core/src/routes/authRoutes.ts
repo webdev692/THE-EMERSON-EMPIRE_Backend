@@ -417,6 +417,7 @@ router.post(
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/me', authMiddleware, AuthController.getMe);
+router.patch('/change-password', authMiddleware, AuthController.changePassword);
 
 /**
  * @swagger

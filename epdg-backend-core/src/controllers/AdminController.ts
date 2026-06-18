@@ -97,61 +97,98 @@ export const getCvAnalysis = async (req: Request, res: Response) => {
        ORDER BY created_at DESC`
     );
 
-    // Category → department fallback mapping
+    // Category → department mapping
     const CATEGORY_DEPT: Record<string, string> = {
-      'Frontend':             'Frontend',
-      'Backend':              'Backend',
-      'Databases':            'Backend',
-      'Programming Languages':'Backend',
-      'Cloud & DevOps':       'Backend',
-      'Design':               'UX/UI',
-      'Digital Marketing':    'Marketing',
-      'Tools & Practices':    'Backend',
-      'Soft Skills':          'Sales',
+      'Frontend':              'Frontend',
+      'Backend':               'Backend',
+      'Databases':             'Backend',
+      'Programming Languages': 'Backend',
+      'Cloud & DevOps':        'Backend',
+      'Design':                'UX/UI',
+      'Digital Marketing':     'Marketing',
+      'Tools & Practices':     'Backend',
+      'Soft Skills':           'Sales',
+    };
+
+    const DEPT_TITLE: Record<string, string> = {
+      'Frontend':  'Frontend Developer Intern',
+      'Backend':   'Backend / Full-Stack Developer Intern',
+      'UX/UI':     'UX / UI Design Intern',
+      'Marketing': 'Digital Marketing Intern',
+      'Sales':     'Business Development Intern',
     };
 
     const internSkills = new Set(parsed.skills.all.map((s) => s.toLowerCase()));
 
-    const recommendations = slots.rows.map((slot) => {
-      const required: string[] = Array.isArray(slot.skills_required)
-        ? slot.skills_required.map((s: string) => s.toLowerCase())
-        : typeof slot.skills_required === 'object' && slot.skills_required
-          ? (Object.values(slot.skills_required) as string[][]).flat().map((s) => s.toLowerCase())
-          : [];
+    let top: any[];
 
-      let score = 0;
-      let matchedSkills: string[] = [];
+    if (slots.rows.length > 0) {
+      // ── Match against real open slots ───────────────────────────────────────
+      const recommendations = slots.rows.map((slot) => {
+        const required: string[] = Array.isArray(slot.skills_required)
+          ? slot.skills_required.map((s: string) => s.toLowerCase())
+          : typeof slot.skills_required === 'object' && slot.skills_required
+            ? (Object.values(slot.skills_required) as string[][]).flat().map((s) => s.toLowerCase())
+            : [];
 
-      if (required.length > 0) {
-        matchedSkills = required.filter((s) => internSkills.has(s));
-        score = Math.round((matchedSkills.length / required.length) * 100);
-      } else {
-        // Fallback: department-based scoring from skill categories
-        const internDepts = Object.entries(parsed.skills.categories)
-          .filter(([, skills]) => skills.length > 0)
-          .map(([cat]) => CATEGORY_DEPT[cat])
-          .filter(Boolean);
+        let score = 0;
+        let matchedSkills: string[] = [];
 
-        if (slot.department && internDepts.includes(slot.department)) {
-          score = 60;
+        if (required.length > 0) {
+          matchedSkills = required.filter((s) => internSkills.has(s));
+          score = Math.round((matchedSkills.length / required.length) * 100);
+        } else {
+          const internDepts = Object.entries(parsed.skills.categories)
+            .filter(([, skills]) => skills.length > 0)
+            .map(([cat]) => CATEGORY_DEPT[cat])
+            .filter(Boolean);
+          if (slot.department && internDepts.includes(slot.department)) score = 60;
+          matchedSkills = parsed.skills.all.slice(0, 5);
         }
-        matchedSkills = parsed.skills.all.slice(0, 5);
+
+        return {
+          id:              slot.id,
+          title:           slot.title,
+          department:      slot.department,
+          description:     slot.description,
+          score,
+          matched_skills:  matchedSkills,
+          required_skills: required,
+          suggested:       false,
+        };
+      });
+
+      recommendations.sort((a, b) => b.score - a.score);
+      top = recommendations.slice(0, 5);
+
+    } else {
+      // ── No open slots — generate department suggestions from skill categories ─
+      const deptSkills: Record<string, string[]> = {};
+
+      for (const [category, skills] of Object.entries(parsed.skills.categories)) {
+        if (!skills.length) continue;
+        const dept = CATEGORY_DEPT[category];
+        if (!dept) continue;
+        if (!deptSkills[dept]) deptSkills[dept] = [];
+        deptSkills[dept].push(...skills);
       }
 
-      return {
-        id:          slot.id,
-        title:       slot.title,
-        department:  slot.department,
-        description: slot.description,
-        score,
-        matched_skills: matchedSkills,
-        required_skills: required,
-      };
-    });
+      const total = parsed.skills.total || 1;
 
-    // Sort by score descending, take top 5
-    recommendations.sort((a, b) => b.score - a.score);
-    const top = recommendations.slice(0, 5);
+      top = Object.entries(deptSkills)
+        .map(([dept, skills], i) => ({
+          id:              -(i + 1),
+          title:           DEPT_TITLE[dept] ?? `${dept} Intern`,
+          department:      dept,
+          description:     'Suggested based on skills found in CV — no open slots yet',
+          score:           Math.min(100, Math.round((skills.length / total) * 100)),
+          matched_skills:  [...new Set(skills)].slice(0, 8),
+          required_skills: [],
+          suggested:       true,
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+    }
 
     res.json({
       success: true,

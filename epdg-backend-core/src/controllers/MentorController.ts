@@ -1,14 +1,15 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import { getPool } from '../db';
 
 // GET /api/mentor/stats
-export const getStats = async (req: AuthRequest, res: Response) => {
+export const getStats = async (req: Request, res: Response) => {
   try {
     const pool = getPool();
+    const userId = (req as AuthRequest).user.id;
     const { rows: me } = await pool.query(
       'SELECT u.name FROM admins a JOIN users u ON u.id = a.user_id WHERE a.user_id = $1',
-      [req.user.id]
+      [userId]
     );
     const mentorName = me[0]?.name ?? '';
 
@@ -41,12 +42,13 @@ export const getStats = async (req: AuthRequest, res: Response) => {
 };
 
 // GET /api/mentor/interns
-export const getMyInterns = async (req: AuthRequest, res: Response) => {
+export const getMyInterns = async (req: Request, res: Response) => {
   try {
     const pool = getPool();
+    const userId = (req as AuthRequest).user.id;
     const { rows: me } = await pool.query(
       'SELECT u.name FROM admins a JOIN users u ON u.id = a.user_id WHERE a.user_id = $1',
-      [req.user.id]
+      [userId]
     );
     const mentorName = me[0]?.name ?? '';
 

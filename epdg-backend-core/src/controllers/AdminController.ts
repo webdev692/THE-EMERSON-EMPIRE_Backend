@@ -102,20 +102,21 @@ export const getCvAnalysis = async (req: Request, res: Response) => {
       'Frontend':              'Frontend',
       'Backend':               'Backend',
       'Databases':             'Backend',
-      'Programming Languages': 'Backend',
-      'Cloud & DevOps':        'Backend',
+      'Programming Languages': 'Full Stack',
+      'Cloud & DevOps':        'Full Stack',
       'Design':                'UX/UI',
       'Digital Marketing':     'Marketing',
-      'Tools & Practices':     'Backend',
+      'Tools & Practices':     'Full Stack',
       'Soft Skills':           'Sales',
     };
 
     const DEPT_TITLE: Record<string, string> = {
-      'Frontend':  'Frontend Developer Intern',
-      'Backend':   'Backend / Full-Stack Developer Intern',
-      'UX/UI':     'UX / UI Design Intern',
-      'Marketing': 'Digital Marketing Intern',
-      'Sales':     'Business Development Intern',
+      'Frontend':   'Frontend Developer Intern',
+      'Backend':    'Backend Developer Intern',
+      'Full Stack': 'Full Stack Developer Intern',
+      'UX/UI':      'UX / UI Design Intern',
+      'Marketing':  'Digital Marketing Intern',
+      'Sales':      'Business Development Intern',
     };
 
     const internSkills = new Set(parsed.skills.all.map((s) => s.toLowerCase()));

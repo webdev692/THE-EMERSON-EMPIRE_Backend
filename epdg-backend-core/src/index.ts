@@ -20,6 +20,7 @@ import internRoutes from './routes/internRoutes';
 import mentorRoutes from './routes/mentorRoutes';
 import uploadRoutes from './routes/uploadRoutes';
 import userRoutes   from './routes/userRoutes';
+import verifyRoutes from './routes/verifyRoutes';
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -59,6 +60,7 @@ app.use('/api/intern', internRoutes);
 app.use('/api/onboarding', internRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/users',  userRoutes);
+app.use('/api',        verifyRoutes); // public — no auth
 
 // --- Error Handling ---
 app.use(errorHandler);

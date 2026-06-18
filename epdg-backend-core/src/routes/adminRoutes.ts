@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authMiddleware, roleGuard } from '../middlewares/auth';
 import * as AdminController from '../controllers/AdminController';
 import * as ApplicationController from '../controllers/ApplicationController';
+import * as CertificateController from '../controllers/CertificateController';
 
 const router = Router();
 
@@ -125,5 +126,11 @@ router.delete('/slots/:id', AdminController.deleteSlot);
 
 // Applications — view all with extracted CV skills
 router.get('/applications', ApplicationController.getAllApplications);
+
+// Certificates
+router.get('/certificates',                   CertificateController.list);
+router.post('/certificates',                  CertificateController.issue);
+router.patch('/certificates/:id/revoke',      CertificateController.revoke);
+router.get('/certificate-templates',          CertificateController.listTemplates);
 
 export default router;

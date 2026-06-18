@@ -165,6 +165,64 @@ export const getCvAnalysis = async (req: Request, res: Response) => {
   }
 };
 
+// GET /api/admin/mentors
+export const getMentors = async (req: Request, res: Response) => {
+  try {
+    const mentors = await adminService.getMentors();
+    res.json({ success: true, data: mentors });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// GET /api/admin/slots?status=&department=
+export const getSlots = async (req: Request, res: Response) => {
+  try {
+    const { status, department } = req.query as Record<string, string>;
+    const slots = await adminService.getSlots({ status, department });
+    res.json({ success: true, data: slots });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/admin/slots
+export const createSlot = async (req: Request, res: Response) => {
+  try {
+    if (!req.body.title) {
+      res.status(400).json({ success: false, message: 'title is required', errors: [] });
+      return;
+    }
+    const adminId = (req as AuthRequest).user.id;
+    const slot = await adminService.createSlot({ ...req.body, created_by: adminId });
+    res.status(201).json({ success: true, data: slot });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// PATCH /api/admin/slots/:id
+export const updateSlot = async (req: Request, res: Response) => {
+  try {
+    const id   = Number(req.params.id);
+    const slot = await adminService.updateSlot(id, req.body);
+    res.json({ success: true, data: slot });
+  } catch (err: any) {
+    const code = err.message === 'Slot not found' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// DELETE /api/admin/slots/:id
+export const deleteSlot = async (req: Request, res: Response) => {
+  try {
+    await adminService.deleteSlot(Number(req.params.id));
+    res.json({ success: true, message: 'Slot deleted.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
 // POST /api/admin/users  — manually create a user
 export const createUser = async (req: Request, res: Response) => {
   try {

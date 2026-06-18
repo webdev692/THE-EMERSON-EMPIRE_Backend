@@ -72,6 +72,9 @@ export class AdminService {
         ip.cover_letter,
         ip.cv_url,
         ip.contact_phone    AS intern_phone,
+        ip.course,
+        ip.department       AS intern_department,
+        ip.mentor_name,
         -- company fields
         c.company_name,
         c.is_approved    AS company_approved,
@@ -195,6 +198,146 @@ export class AdminService {
 
   // ─── Private helpers ─────────────────────────────────────────────────────────
 
+  // ─── Mentors ─────────────────────────────────────────────────────────────────
+
+  async getMentors() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT u.id, u.name, u.email, a.department
+      FROM admins a
+      JOIN users u ON u.id = a.user_id
+      WHERE a.is_mentor = true AND u.deleted_at IS NULL
+      ORDER BY u.name
+    `);
+    return rows;
+  }
+
+  // ─── Internship Slots ────────────────────────────────────────────────────────
+
+  async getSlots(filters: { status?: string; department?: string } = {}) {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT
+        s.id, s.title, s.department, s.description, s.requirements,
+        s.skills_required, s.slots_available, s.slots_filled,
+        s.duration_weeks, s.stipend, s.is_remote, s.county,
+        s.deadline, s.status, s.created_at,
+        c.company_name,
+        u.name AS created_by_name
+      FROM internship_slots s
+      LEFT JOIN companies c ON c.id = s.company_id
+      LEFT JOIN users     u ON u.id = s.created_by
+      WHERE s.deleted_at IS NULL
+      ORDER BY s.created_at DESC
+    `);
+
+    let slots = rows;
+    if (filters.status)     slots = slots.filter((s) => s.status     === filters.status);
+    if (filters.department) slots = slots.filter((s) => s.department === filters.department);
+    return slots;
+  }
+
+  async createSlot(data: {
+    title: string;
+    department?: string;
+    description?: string;
+    requirements?: string;
+    skills_required?: string[];
+    slots_available?: number;
+    duration_weeks?: number;
+    stipend?: number;
+    is_remote?: boolean;
+    county?: string;
+    deadline?: string;
+    status?: string;
+    company_id?: number;
+    created_by?: number;
+  }) {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      INSERT INTO internship_slots (
+        title, department, description, requirements, skills_required,
+        slots_available, duration_weeks, stipend, is_remote, county,
+        deadline, status, company_id, created_by, created_at
+      ) VALUES (
+        $1, $2, $3, $4, $5::jsonb,
+        $6, $7, $8, $9, $10,
+        $11, $12::internship_slot_status, $13, $14, NOW()
+      ) RETURNING *
+    `, [
+      data.title,
+      data.department   || null,
+      data.description  || null,
+      data.requirements || null,
+      data.skills_required ? JSON.stringify(data.skills_required) : null,
+      data.slots_available ?? 1,
+      data.duration_weeks  || null,
+      data.stipend         || null,
+      data.is_remote       ?? false,
+      data.county          || null,
+      data.deadline        || null,
+      data.status          || 'draft',
+      data.company_id      || null,
+      data.created_by      || null,
+    ]);
+    return rows[0];
+  }
+
+  async updateSlot(id: number, data: {
+    title?: string;
+    department?: string;
+    description?: string;
+    requirements?: string;
+    skills_required?: string[];
+    slots_available?: number;
+    duration_weeks?: number;
+    stipend?: number;
+    is_remote?: boolean;
+    county?: string;
+    deadline?: string;
+    status?: string;
+  }) {
+    const pool = getPool();
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    const add = (col: string, val: unknown) => {
+      if (val !== undefined) { fields.push(`${col}=$${values.length + 1}`); values.push(val); }
+    };
+
+    add('title',           data.title);
+    add('department',      data.department);
+    add('description',     data.description);
+    add('requirements',    data.requirements);
+    add('slots_available', data.slots_available);
+    add('duration_weeks',  data.duration_weeks);
+    add('stipend',         data.stipend);
+    add('is_remote',       data.is_remote);
+    add('county',          data.county);
+    add('deadline',        data.deadline);
+    if (data.status)          { fields.push(`status=$${values.length + 1}::internship_slot_status`); values.push(data.status); }
+    if (data.skills_required) { fields.push(`skills_required=$${values.length + 1}::jsonb`);          values.push(JSON.stringify(data.skills_required)); }
+
+    if (!fields.length) throw new Error('No fields to update');
+
+    values.push(id);
+    const { rows } = await pool.query(
+      `UPDATE internship_slots SET ${fields.join(', ')} WHERE id=$${values.length} AND deleted_at IS NULL RETURNING *`,
+      values
+    );
+    if (!rows.length) throw new Error('Slot not found');
+    return rows[0];
+  }
+
+  async deleteSlot(id: number) {
+    const pool = getPool();
+    await pool.query(
+      'UPDATE internship_slots SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL',
+      [id]
+    );
+  }
+
   private async approve(client: any, user: any, adminId: number, payload: any) {
     const now = new Date();
 
@@ -301,6 +444,9 @@ export class AdminService {
       phone:                r.intern_phone      || null,
       cover_letter:         r.cover_letter      || null,
       cv_url:               r.cv_url            || null,
+      course:               r.course            || null,
+      department:           r.intern_department || null,
+      mentor:               r.mentor_name       || null,
       industry:             r.industry         || null,
       contact_person:       r.company_contact  || r.school_contact  || null,
       country:              r.country          || null,

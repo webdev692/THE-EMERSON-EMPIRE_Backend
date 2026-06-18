@@ -112,6 +112,15 @@ router.delete('/users/:id', AdminController.deleteUser);
 // CV analysis + internship recommendations for a specific intern
 router.get('/users/:id/cv-analysis', AdminController.getCvAnalysis);
 
+// Mentors — admins with is_mentor = true
+router.get('/mentors', AdminController.getMentors);
+
+// Internship slots — admin CRUD
+router.get('/slots',        AdminController.getSlots);
+router.post('/slots',       AdminController.createSlot);
+router.patch('/slots/:id',  AdminController.updateSlot);
+router.delete('/slots/:id', AdminController.deleteSlot);
+
 // Applications — view all with extracted CV skills
 router.get('/applications', ApplicationController.getAllApplications);
 

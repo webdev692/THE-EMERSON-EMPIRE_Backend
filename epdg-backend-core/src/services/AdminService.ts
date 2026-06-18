@@ -203,13 +203,74 @@ export class AdminService {
   async getMentors() {
     const pool = getPool();
     const { rows } = await pool.query(`
-      SELECT u.id, u.name, u.email, a.department
+      SELECT
+        u.id, u.name, u.email, a.department,
+        COALESCE(a.max_capacity, 3) AS max_capacity,
+        (SELECT COUNT(*) FROM intern_profiles ip WHERE ip.mentor_name = u.name)::int AS assigned_count
       FROM admins a
       JOIN users u ON u.id = a.user_id
       WHERE a.is_mentor = true AND u.deleted_at IS NULL
       ORDER BY u.name
     `);
     return rows;
+  }
+
+  async createMentor(data: {
+    name: string;
+    email: string;
+    password: string;
+    department: string;
+    max_capacity: number;
+  }) {
+    const pool   = getPool();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const existing = await client.query(
+        `SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL`,
+        [data.email]
+      );
+      if (existing.rows.length) throw new Error('Email already in use.');
+
+      const hashed = await bcrypt.hash(data.password, 10);
+
+      const { rows: [user] } = await client.query(
+        `INSERT INTO users (name, email, password_hash, role, status, created_at)
+         VALUES ($1, $2, $3, 'admin', 'approved', NOW()) RETURNING id`,
+        [data.name, data.email, hashed]
+      );
+
+      await client.query(
+        `INSERT INTO admins (user_id, admin_role, is_mentor, department, max_capacity, created_at)
+         VALUES ($1, 'admin', TRUE, $2, $3, NOW())`,
+        [user.id, data.department, data.max_capacity]
+      );
+
+      await client.query('COMMIT');
+      return {
+        id:             user.id,
+        name:           data.name,
+        email:          data.email,
+        department:     data.department,
+        max_capacity:   data.max_capacity,
+        assigned_count: 0,
+      };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deactivateMentor(userId: number) {
+    const pool = getPool();
+    const { rowCount } = await pool.query(
+      `UPDATE admins SET is_mentor = FALSE WHERE user_id = $1`,
+      [userId]
+    );
+    if (!rowCount) throw new Error('Mentor not found.');
   }
 
   // ─── Internship Slots ────────────────────────────────────────────────────────

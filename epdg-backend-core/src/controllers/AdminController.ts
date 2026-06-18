@@ -213,6 +213,39 @@ export const getMentors = async (req: Request, res: Response) => {
   }
 };
 
+// POST /api/admin/mentors
+export const createMentor = async (req: Request, res: Response) => {
+  try {
+    const { name, email, password, department, max_capacity } = req.body;
+    if (!name || !email || !password) {
+      res.status(400).json({ success: false, message: 'name, email and password are required', errors: [] });
+      return;
+    }
+    const mentor = await adminService.createMentor({
+      name,
+      email,
+      password,
+      department: department ?? 'Frontend',
+      max_capacity: Number(max_capacity) || 3,
+    });
+    res.status(201).json({ success: true, data: mentor });
+  } catch (err: any) {
+    const code = err.message?.includes('already') ? 409 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// DELETE /api/admin/mentors/:id
+export const deactivateMentor = async (req: Request, res: Response) => {
+  try {
+    await adminService.deactivateMentor(Number(req.params.id));
+    res.json({ success: true, message: 'Mentor deactivated.' });
+  } catch (err: any) {
+    const code = err.message === 'Mentor not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
 // GET /api/admin/slots?status=&department=
 export const getSlots = async (req: Request, res: Response) => {
   try {

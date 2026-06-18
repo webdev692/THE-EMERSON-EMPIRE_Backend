@@ -113,7 +113,9 @@ router.delete('/users/:id', AdminController.deleteUser);
 router.get('/users/:id/cv-analysis', AdminController.getCvAnalysis);
 
 // Mentors — admins with is_mentor = true
-router.get('/mentors', AdminController.getMentors);
+router.get('/mentors',        AdminController.getMentors);
+router.post('/mentors',       AdminController.createMentor);
+router.delete('/mentors/:id', AdminController.deactivateMentor);
 
 // Internship slots — admin CRUD
 router.get('/slots',        AdminController.getSlots);

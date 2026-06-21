@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authMiddleware, roleGuard } from '../middlewares/auth';
+import { authMiddleware, roleGuard, superAdminGuard } from '../middlewares/auth';
 import * as AdminController from '../controllers/AdminController';
 import * as ApplicationController from '../controllers/ApplicationController';
 import * as CertificateController from '../controllers/CertificateController';
@@ -108,21 +108,23 @@ router.patch('/users/:id', AdminController.updateUser);
  *     security:
  *       - bearerAuth: []
  */
-router.delete('/users/:id', AdminController.deleteUser);
+router.delete('/users/:id', superAdminGuard, AdminController.deleteUser);
+router.patch('/users/:id/role', superAdminGuard, AdminController.promoteUser);
 
 // CV analysis + internship recommendations for a specific intern
 router.get('/users/:id/cv-analysis', AdminController.getCvAnalysis);
 
 // Mentors — admins with is_mentor = true
-router.get('/mentors',        AdminController.getMentors);
-router.post('/mentors',       AdminController.createMentor);
-router.delete('/mentors/:id', AdminController.deactivateMentor);
+router.get('/mentors',                          AdminController.getMentors);
+router.post('/mentors',                         AdminController.createMentor);
+router.patch('/mentors/:id/reset-password',     AdminController.resetMentorPassword);
+router.delete('/mentors/:id', superAdminGuard,  AdminController.deactivateMentor);
 
 // Internship slots — admin CRUD
 router.get('/slots',        AdminController.getSlots);
 router.post('/slots',       AdminController.createSlot);
 router.patch('/slots/:id',  AdminController.updateSlot);
-router.delete('/slots/:id', AdminController.deleteSlot);
+router.delete('/slots/:id', superAdminGuard, AdminController.deleteSlot);
 
 // Applications — view all with extracted CV skills
 router.get('/applications', ApplicationController.getAllApplications);
@@ -130,7 +132,43 @@ router.get('/applications', ApplicationController.getAllApplications);
 // Certificates
 router.get('/certificates',                   CertificateController.list);
 router.post('/certificates',                  CertificateController.issue);
-router.patch('/certificates/:id/revoke',      CertificateController.revoke);
+router.patch('/certificates/:id/revoke', superAdminGuard, CertificateController.revoke);
 router.get('/certificate-templates',          CertificateController.listTemplates);
+
+// Placements
+router.get('/placements',            AdminController.listPlacements);
+router.patch('/placements/:id/end',  AdminController.endPlacement);
+
+// Announcements
+router.get('/announcements',  AdminController.listAnnouncements);
+router.post('/announcements', AdminController.createAnnouncement);
+
+// Gamification
+router.get('/gamification/leaderboard',         AdminController.getLeaderboard);
+router.get('/gamification/audit',               AdminController.getGamificationAudit);
+router.get('/gamification/badges',              AdminController.listBadges);
+router.post('/gamification/adjust',             AdminController.adjustPoints);
+router.post('/gamification/badges/:id/award',   AdminController.awardBadge);
+
+// Cohort analytics
+router.get('/cohort-analytics', AdminController.getCohortAnalytics);
+
+// Resources
+router.get('/resources',          AdminController.listResources);
+router.post('/resources',         AdminController.createResource);
+router.patch('/resources/:id',    AdminController.updateResource);
+router.delete('/resources/:id', superAdminGuard, AdminController.deleteResource);
+
+// Feedback
+router.get('/feedback',        AdminController.listFeedback);
+router.post('/feedback',       AdminController.createFeedback);
+router.patch('/feedback/:id',  AdminController.updateFeedback);
+
+// Platform settings — read open to all admins, write requires super admin
+router.get('/settings',   AdminController.getSettings);
+router.patch('/settings', superAdminGuard, AdminController.updateSettings);
+
+// Audit log
+router.get('/audit-log', AdminController.getAuditLog);
 
 export default router;

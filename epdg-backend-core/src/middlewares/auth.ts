@@ -8,6 +8,7 @@ export interface AuthRequest extends Request {
     id: number;
     email: string;
     role: string;
+    admin_role?: string;
   };
 }
 
@@ -22,8 +23,8 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: number; email: string; role: string };
-    (req as AuthRequest).user = { id: decoded.id, email: decoded.email, role: decoded.role };
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: number; email: string; role: string; admin_role?: string };
+    (req as AuthRequest).user = { id: decoded.id, email: decoded.email, role: decoded.role, admin_role: decoded.admin_role };
     next();
   } catch {
     res.status(401).json({ success: false, message: 'Invalid or expired token', errors: [] });
@@ -39,4 +40,13 @@ export const roleGuard = (...roles: string[]) => {
     }
     next();
   };
+};
+
+export const superAdminGuard = (req: Request, res: Response, next: NextFunction) => {
+  const authReq = req as AuthRequest;
+  if (!authReq.user || authReq.user.admin_role !== 'super_admin') {
+    res.status(403).json({ success: false, message: 'Access denied. Super admin required.', errors: [] });
+    return;
+  }
+  next();
 };

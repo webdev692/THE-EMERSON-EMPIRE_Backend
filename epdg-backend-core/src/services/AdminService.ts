@@ -18,12 +18,13 @@ export class AdminService {
   async getStats() {
     const pool = getPool();
 
-    const [companies, schools, interns, placements, pendingCo, pendingSch, pendingInt] =
+    const [companies, schools, interns, placements, certs, pendingCo, pendingSch, pendingInt] =
       await Promise.all([
         pool.query(`SELECT COUNT(*) FROM users WHERE role='company' AND deleted_at IS NULL`),
         pool.query(`SELECT COUNT(*) FROM users WHERE role='school'  AND deleted_at IS NULL`),
         pool.query(`SELECT COUNT(*) FROM users WHERE role='intern'  AND deleted_at IS NULL`),
         pool.query(`SELECT COUNT(*) FROM placements WHERE status='active'`),
+        pool.query(`SELECT COUNT(*) FROM certificates WHERE status='active'`),
         pool.query(`
           SELECT u.name, u.created_at FROM companies c
           JOIN users u ON u.id = c.user_id
@@ -49,10 +50,11 @@ export class AdminService {
       Number(pendingInt.rows[0].count);
 
     return {
-      companies:        Number(companies.rows[0].count),
-      schools:          Number(schools.rows[0].count),
-      interns:          Number(interns.rows[0].count),
+      companies:         Number(companies.rows[0].count),
+      schools:           Number(schools.rows[0].count),
+      interns:           Number(interns.rows[0].count),
       active_placements: Number(placements.rows[0].count),
+      certificates:      Number(certs.rows[0].count),
       pending_approvals: pendingTotal,
       pending_companies: pendingCo.rows,
       pending_schools:   pendingSch.rows,
@@ -310,6 +312,31 @@ export class AdminService {
     if (!rowCount) throw new Error('Mentor not found.');
   }
 
+  async resetMentorPassword(userId: number, newPassword: string) {
+    const pool   = getPool();
+    const hashed = await bcrypt.hash(newPassword, 10);
+
+    const { rows } = await pool.query(
+      `SELECT u.email, u.name FROM users u
+       JOIN admins a ON a.user_id = u.id
+       WHERE u.id = $1 AND a.is_mentor = TRUE AND u.deleted_at IS NULL`,
+      [userId]
+    );
+    if (!rows.length) throw new Error('Mentor not found.');
+
+    await pool.query(
+      `UPDATE users SET password = $1 WHERE id = $2`,
+      [hashed, userId]
+    );
+    await pool.query(
+      `UPDATE admins SET force_password_change = TRUE WHERE user_id = $1`,
+      [userId]
+    );
+
+    this.sendMentorWelcomeEmail(rows[0].email, rows[0].name, newPassword, '(unchanged)');
+    return { email: rows[0].email, name: rows[0].name };
+  }
+
   // ─── Internship Slots ────────────────────────────────────────────────────────
 
   async getSlots(filters: { status?: string; department?: string } = {}) {
@@ -434,6 +461,409 @@ export class AdminService {
       'UPDATE internship_slots SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL',
       [id]
     );
+  }
+
+  // ─── Placements ──────────────────────────────────────────────────────────────
+
+  async listPlacements() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT
+        p.id,
+        u.name        AS intern_name,
+        u.email       AS intern_email,
+        c.company_name,
+        s.department,
+        mu.name       AS mentor_name,
+        p.start_date,
+        p.end_date,
+        p.status,
+        p.termination_reason,
+        ROUND(LEAST(100, GREATEST(0,
+          EXTRACT(EPOCH FROM (NOW() - p.start_date))::float
+          / NULLIF(EXTRACT(EPOCH FROM (p.end_date - p.start_date))::float, 0)
+          * 100
+        )))::int AS progress_percent
+      FROM placements p
+      JOIN intern_profiles ip ON ip.id  = p.intern_id
+      JOIN users           u  ON u.id   = ip.user_id
+      JOIN companies       c  ON c.id   = p.company_id
+      JOIN internship_slots s ON s.id   = p.slot_id
+      LEFT JOIN users mu ON mu.id = p.mentor_id
+      WHERE u.deleted_at IS NULL
+      ORDER BY p.start_date DESC
+    `);
+
+    return rows.map((r) => {
+      let status = r.status as string;
+      if (status === 'on_hold') status = 'active';
+      if (status === 'active') {
+        const endDate  = new Date(r.end_date);
+        const twoWeeks = new Date();
+        twoWeeks.setDate(twoWeeks.getDate() + 14);
+        if (endDate <= twoWeeks) status = 'ending_soon';
+      }
+      const name = r.intern_name as string;
+      return {
+        id:              r.id,
+        internName:      name,
+        internInitials:  name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase(),
+        internEmail:     r.intern_email,
+        company:         r.company_name,
+        department:      r.department  || '',
+        mentor:          r.mentor_name || '',
+        startDate:       r.start_date,
+        endDate:         r.end_date,
+        status,
+        progressPercent: Number(r.progress_percent),
+        notes:           r.termination_reason || '',
+      };
+    });
+  }
+
+  async endPlacement(id: number, reason: string) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `UPDATE placements SET status='terminated', termination_reason=$1, completed_at=NOW()
+       WHERE id=$2 AND status IN ('active','on_hold') RETURNING id`,
+      [reason, id]
+    );
+    if (!rows.length) throw new Error('Placement not found or already ended.');
+  }
+
+  // ─── Announcements ────────────────────────────────────────────────────────────
+
+  async listAnnouncements() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT a.id, a.subject, a.message, a.target_audience, a.total_recipients, a.created_at,
+             u.name AS created_by_name
+      FROM announcements a
+      LEFT JOIN users u ON u.id = a.created_by
+      ORDER BY a.created_at DESC
+      LIMIT 50
+    `);
+    return rows;
+  }
+
+  async createAnnouncement(data: {
+    subject: string;
+    message: string;
+    targetAudience: string;
+    createdBy: number;
+  }) {
+    const pool = getPool();
+    const audienceFilter: Record<string, string> = {
+      interns:   `role='intern'`,
+      companies: `role='company'`,
+      schools:   `role='school'`,
+      mentors:   `id IN (SELECT user_id FROM admins WHERE is_mentor=TRUE)`,
+    };
+    let countQ = `SELECT COUNT(*) FROM users WHERE deleted_at IS NULL`;
+    if (data.targetAudience !== 'all' && audienceFilter[data.targetAudience]) {
+      countQ += ` AND ${audienceFilter[data.targetAudience]}`;
+    }
+    const countRes        = await pool.query(countQ);
+    const totalRecipients = Number(countRes.rows[0].count);
+
+    const { rows } = await pool.query(
+      `INSERT INTO announcements (subject, message, target_audience, created_by, total_recipients, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
+      [data.subject, data.message, data.targetAudience, data.createdBy, totalRecipients]
+    );
+    return rows[0];
+  }
+
+  // ─── Gamification ────────────────────────────────────────────────────────────
+
+  async getLeaderboard() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT
+        u.id,
+        u.name,
+        COALESCE(ip.department, '') AS department,
+        COALESCE(SUM(pe.points), 0)::int AS total_points,
+        COALESCE(SUM(CASE WHEN pe.created_at >= DATE_TRUNC('month', NOW()) THEN pe.points ELSE 0 END), 0)::int AS month_points,
+        COALESCE(SUM(CASE WHEN pe.created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
+                           AND pe.created_at < DATE_TRUNC('month', NOW()) THEN pe.points ELSE 0 END), 0)::int AS prev_month_points
+      FROM users u
+      JOIN intern_profiles ip ON ip.user_id = u.id
+      LEFT JOIN point_events pe ON pe.user_id = u.id
+      WHERE u.role = 'intern' AND u.deleted_at IS NULL
+      GROUP BY u.id, u.name, ip.department
+      ORDER BY total_points DESC
+      LIMIT 20
+    `);
+
+    const ids = rows.map((r) => r.id);
+    const badgesRes = ids.length
+      ? await pool.query(
+          `SELECT ba.user_id, b.name FROM badge_awards ba JOIN badges b ON b.id = ba.badge_id WHERE ba.user_id = ANY($1)`,
+          [ids]
+        )
+      : { rows: [] };
+
+    const byUser: Record<number, string[]> = {};
+    for (const b of badgesRes.rows) {
+      if (!byUser[b.user_id]) byUser[b.user_id] = [];
+      byUser[b.user_id].push(b.name);
+    }
+
+    return rows.map((r, idx) => {
+      const trend: 'up' | 'down' | 'stable' =
+        r.month_points > r.prev_month_points ? 'up' :
+        r.month_points < r.prev_month_points ? 'down' : 'stable';
+      const name = r.name as string;
+      return {
+        id:          r.id,
+        name,
+        initials:    name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase(),
+        company:     '',
+        department:  r.department,
+        totalPoints: r.total_points,
+        monthPoints: r.month_points,
+        rank:        idx + 1,
+        badges:      byUser[r.id] || [],
+        trend,
+      };
+    });
+  }
+
+  async getAuditLog() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT pe.id, u.name AS intern_name, pe.action, pe.points,
+             pe.created_at AS date, au.name AS awarded_by
+      FROM point_events pe
+      JOIN users u  ON u.id  = pe.user_id
+      LEFT JOIN users au ON au.id = pe.awarded_by
+      ORDER BY pe.created_at DESC
+      LIMIT 100
+    `);
+    return rows.map((r) => ({
+      id:         r.id,
+      internName: r.intern_name,
+      action:     r.action,
+      points:     r.points,
+      date:       new Date(r.date).toISOString().slice(0, 10),
+      awardedBy:  r.awarded_by || 'System',
+    }));
+  }
+
+  async listBadges() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT b.id, b.name, b.emoji, b.description,
+             COUNT(ba.id)::int AS times_awarded
+      FROM badges b
+      LEFT JOIN badge_awards ba ON ba.badge_id = b.id
+      GROUP BY b.id, b.name, b.emoji, b.description
+      ORDER BY b.id
+    `);
+    return rows;
+  }
+
+  async adjustPoints(data: {
+    userId: number; points: number; action: string; awardedBy: number;
+  }) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name FROM users u WHERE u.id=$1 AND u.role='intern' AND u.deleted_at IS NULL`,
+      [data.userId]
+    );
+    if (!rows.length) throw new Error('Intern not found.');
+    await pool.query(
+      `INSERT INTO point_events (user_id, action, points, awarded_by, created_at) VALUES ($1,$2,$3,$4,NOW())`,
+      [data.userId, data.action, data.points, data.awardedBy]
+    );
+    return rows[0];
+  }
+
+  async awardBadge(badgeId: number, userId: number, awardedBy: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `INSERT INTO badge_awards (badge_id, user_id, awarded_by, awarded_at) VALUES ($1,$2,$3,NOW()) RETURNING id`,
+      [badgeId, userId, awardedBy]
+    );
+    return rows[0];
+  }
+
+  // ─── Cohort Analytics ────────────────────────────────────────────────────────
+
+  async getCohortAnalytics() {
+    const pool = getPool();
+    const [pStats, fStats] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status='active')    AS active,
+          COUNT(*) FILTER (WHERE status='completed') AS completed,
+          COUNT(*) FILTER (WHERE status='terminated')AS terminated,
+          COUNT(*) AS total
+        FROM placements
+      `),
+      pool.query(`SELECT ROUND(AVG(rating)::numeric, 1) AS avg_rating FROM feedback`),
+    ]);
+    const s         = pStats.rows[0];
+    const completed = Number(s.completed);
+    const active    = Number(s.active);
+    const terminated = Number(s.terminated);
+    const done      = completed + terminated;
+    return {
+      completionRate:      Number(s.total) > 0 ? Math.round((completed / Number(s.total)) * 100) : 0,
+      mentorSatisfaction:  fStats.rows[0].avg_rating ? Number(fStats.rows[0].avg_rating) : null,
+      cohortsActive:       active,
+      placementSuccess:    done > 0 ? Math.round((completed / done) * 100) : 0,
+    };
+  }
+
+  // ─── Resources ───────────────────────────────────────────────────────────────
+
+  async listResources() {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT id, title, type, url, owner, status, updated_at FROM resources ORDER BY updated_at DESC`
+    );
+    return rows.map((r) => ({
+      id:      r.id,
+      title:   r.title,
+      type:    r.type,
+      url:     r.url,
+      owner:   r.owner,
+      status:  r.status,
+      updated: new Date(r.updated_at).toLocaleDateString(),
+    }));
+  }
+
+  async createResource(data: {
+    title: string; type?: string; url?: string; owner?: string; status?: string; createdBy: number;
+  }) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `INSERT INTO resources (title, type, url, owner, status, created_by, updated_at, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW()) RETURNING *`,
+      [data.title, data.type || 'guide', data.url || null, data.owner || null, data.status || 'draft', data.createdBy]
+    );
+    return rows[0];
+  }
+
+  async updateResource(id: number, data: { title?: string; type?: string; url?: string; owner?: string; status?: string }) {
+    const pool = getPool();
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    const add = (col: string, val: unknown) => {
+      if (val !== undefined) { fields.push(`${col}=$${values.length + 1}`); values.push(val); }
+    };
+    add('title', data.title); add('type', data.type); add('url', data.url);
+    add('owner', data.owner); add('status', data.status);
+    fields.push(`updated_at=NOW()`);
+    if (fields.length === 1) throw new Error('No fields to update');
+    values.push(id);
+    const { rows } = await pool.query(
+      `UPDATE resources SET ${fields.join(', ')} WHERE id=$${values.length} RETURNING *`,
+      values
+    );
+    if (!rows.length) throw new Error('Resource not found.');
+    return rows[0];
+  }
+
+  async deleteResource(id: number) {
+    const pool = getPool();
+    await pool.query(`DELETE FROM resources WHERE id=$1`, [id]);
+  }
+
+  // ─── Feedback ────────────────────────────────────────────────────────────────
+
+  async listFeedback() {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT id, from_name, role, category, comment, rating, status FROM feedback ORDER BY created_at DESC`
+    );
+    return rows.map((r) => ({
+      id:       r.id,
+      from:     r.from_name,
+      role:     r.role,
+      category: r.category,
+      comment:  r.comment,
+      rating:   r.rating,
+      status:   r.status,
+    }));
+  }
+
+  async createFeedback(data: {
+    fromName: string; role: string; category: string; comment: string; rating: number;
+  }) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `INSERT INTO feedback (from_name, role, category, comment, rating, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,'new',NOW()) RETURNING *`,
+      [data.fromName, data.role, data.category, data.comment, data.rating]
+    );
+    return rows[0];
+  }
+
+  async updateFeedbackStatus(id: number, status: string) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `UPDATE feedback SET status=$1 WHERE id=$2 RETURNING id`,
+      [status, id]
+    );
+    if (!rows.length) throw new Error('Feedback not found.');
+  }
+
+  // ─── Platform Settings ───────────────────────────────────────────────────────
+
+  async getSettings() {
+    const pool = getPool();
+    const { rows } = await pool.query(`SELECT key, value FROM platform_settings`);
+    const out: Record<string, string> = {};
+    for (const r of rows) out[r.key] = r.value;
+    return out;
+  }
+
+  async updateSettings(settings: Record<string, string>) {
+    const pool = getPool();
+    for (const [key, value] of Object.entries(settings)) {
+      await pool.query(
+        `INSERT INTO platform_settings (key, value, updated_at) VALUES ($1,$2,NOW())
+         ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()`,
+        [key, value]
+      );
+    }
+  }
+
+  // ─── Audit Log ───────────────────────────────────────────────────────────────
+
+  async logAuditEvent(adminId: number, action: string, targetType?: string, targetId?: string, metadata?: object) {
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO audit_log (admin_id, action, target_type, target_id, metadata) VALUES ($1,$2,$3,$4,$5)`,
+      [adminId, action, targetType ?? null, targetId ?? null, metadata ? JSON.stringify(metadata) : null]
+    );
+  }
+
+  async getAuditLogEntries(limit = 50, offset = 0) {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT al.id, al.action, al.target_type, al.target_id, al.metadata,
+             al.created_at, u.name AS admin_name, u.email AS admin_email
+      FROM audit_log al
+      LEFT JOIN users u ON u.id = al.admin_id
+      ORDER BY al.created_at DESC
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
+    return rows;
+  }
+
+  // ─── Promote / Demote admin role ─────────────────────────────────────────────
+
+  async promoteUser(targetUserId: number, newAdminRole: 'admin' | 'super_admin') {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `UPDATE admins SET admin_role=$1 WHERE user_id=$2 RETURNING user_id`,
+      [newAdminRole, targetUserId]
+    );
+    if (!rows.length) throw new Error('Admin record not found');
   }
 
   private async approve(client: any, user: any, adminId: number, payload: any) {

@@ -117,6 +117,7 @@ export class AuthService {
       status: string;
       is_mentor: boolean;
       force_password_change: boolean;
+      admin_role?: string;
     };
   }> {
     const pool = getPool();
@@ -153,6 +154,7 @@ export class AuthService {
     let status = 'approved';
     let is_mentor = false;
     let force_password_change = false;
+    let admin_role: string | undefined;
 
     if (user.role === 'company') {
       const r = await pool.query(
@@ -180,16 +182,17 @@ export class AuthService {
       }
     } else if (user.role === 'admin') {
       const r = await pool.query(
-        'SELECT is_mentor, force_password_change FROM admins WHERE user_id = $1',
+        'SELECT is_mentor, force_password_change, admin_role FROM admins WHERE user_id = $1',
         [user.id]
       );
       if (r.rows.length > 0) {
         is_mentor             = r.rows[0].is_mentor             ?? false;
         force_password_change = r.rows[0].force_password_change ?? false;
+        admin_role            = r.rows[0].admin_role            ?? 'admin';
       }
     }
 
-    const token = this.generateToken(user);
+    const token = this.generateToken(user, admin_role);
 
     return {
       token,
@@ -201,6 +204,7 @@ export class AuthService {
         status,
         is_mentor,
         force_password_change,
+        admin_role,
       },
     };
   }
@@ -238,7 +242,14 @@ export class AuthService {
       throw new Error('User not found');
     }
 
-    const newToken = this.generateToken(result.rows[0]);
+    const user = result.rows[0];
+    let admin_role: string | undefined;
+    if (user.role === 'admin') {
+      const r = await pool.query('SELECT admin_role FROM admins WHERE user_id = $1', [user.id]);
+      if (r.rows.length > 0) admin_role = r.rows[0].admin_role ?? 'admin';
+    }
+
+    const newToken = this.generateToken(user, admin_role);
 
     return { token: newToken };
   }
@@ -400,8 +411,9 @@ export class AuthService {
     return;
   }
 
-  private generateToken(user: any): string {
-    const payload = { id: user.id, email: user.email, role: user.role };
+  private generateToken(user: any, admin_role?: string): string {
+    const payload: Record<string, unknown> = { id: user.id, email: user.email, role: user.role };
+    if (admin_role) payload.admin_role = admin_role;
     return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
   }
 

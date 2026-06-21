@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import * as CertService from '../services/CertificateService';
+import { AdminService } from '../services/AdminService';
+
+const adminService = new AdminService();
 
 // POST /api/admin/certificates
 export const issue = async (req: Request, res: Response) => {
@@ -21,6 +24,7 @@ export const issue = async (req: Request, res: Response) => {
       issueDate:   issue_date,
     });
 
+    await adminService.logAuditEvent(adminUserId, 'certificate.issue', 'certificate', cert.certificate_id, { intern_id });
     res.status(201).json({ success: true, data: cert });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });
@@ -30,7 +34,9 @@ export const issue = async (req: Request, res: Response) => {
 // PATCH /api/admin/certificates/:id/revoke
 export const revoke = async (req: Request, res: Response) => {
   try {
+    const adminId = (req as AuthRequest).user.id;
     const cert = await CertService.revokeCertificate(req.params.id);
+    await adminService.logAuditEvent(adminId, 'certificate.revoke', 'certificate', req.params.id);
     res.json({ success: true, data: cert });
   } catch (err: any) {
     const status = err.message === 'Certificate not found' ? 404 : 500;

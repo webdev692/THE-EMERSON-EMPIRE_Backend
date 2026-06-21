@@ -39,6 +39,7 @@ export const updateUser = async (req: Request, res: Response) => {
     }
 
     const updated = await adminService.updateUserStatus(userId, adminId, req.body);
+    await adminService.logAuditEvent(adminId, `user.${req.body.status}`, 'user', String(userId));
     res.json({ success: true, data: updated });
   } catch (err: any) {
     const code = err.message === 'User not found' ? 404 : 500;
@@ -58,6 +59,7 @@ export const deleteUser = async (req: Request, res: Response) => {
     }
 
     await adminService.deleteUser(userId);
+    await adminService.logAuditEvent(adminId, 'user.delete', 'user', String(userId));
     res.json({ success: true, message: 'User deleted.' });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });
@@ -235,6 +237,22 @@ export const createMentor = async (req: Request, res: Response) => {
   }
 };
 
+// PATCH /api/admin/mentors/:id/reset-password
+export const resetMentorPassword = async (req: Request, res: Response) => {
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 8) {
+      res.status(400).json({ success: false, message: 'password must be at least 8 characters', errors: [] });
+      return;
+    }
+    const result = await adminService.resetMentorPassword(Number(req.params.id), password);
+    res.json({ success: true, message: `Password reset for ${result.name}. Credentials email sent.` });
+  } catch (err: any) {
+    const code = err.message === 'Mentor not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
 // DELETE /api/admin/mentors/:id
 export const deactivateMentor = async (req: Request, res: Response) => {
   try {
@@ -313,6 +331,288 @@ export const createUser = async (req: Request, res: Response) => {
     res.status(201).json({ success: true, data: user });
   } catch (err: any) {
     const code = err.message?.includes('already') ? 409 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Placements ──────────────────────────────────────────────────────────────
+
+export const listPlacements = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.listPlacements();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const endPlacement = async (req: Request, res: Response) => {
+  try {
+    const { reason } = req.body;
+    if (!reason?.trim()) {
+      res.status(400).json({ success: false, message: 'reason is required', errors: [] });
+      return;
+    }
+    await adminService.endPlacement(Number(req.params.id), reason.trim());
+    res.json({ success: true, message: 'Placement ended.' });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Announcements ────────────────────────────────────────────────────────────
+
+export const listAnnouncements = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.listAnnouncements();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const createAnnouncement = async (req: Request, res: Response) => {
+  try {
+    const { subject, message, targetAudience } = req.body;
+    if (!subject?.trim() || !message?.trim()) {
+      res.status(400).json({ success: false, message: 'subject and message are required', errors: [] });
+      return;
+    }
+    const adminId = (req as AuthRequest).user.id;
+    const data = await adminService.createAnnouncement({
+      subject:        subject.trim(),
+      message:        message.trim(),
+      targetAudience: targetAudience || 'all',
+      createdBy:      adminId,
+    });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Gamification ────────────────────────────────────────────────────────────
+
+export const getLeaderboard = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.getLeaderboard();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getGamificationAudit = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.getAuditLog();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const listBadges = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.listBadges();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const adjustPoints = async (req: Request, res: Response) => {
+  try {
+    const { userId, points, action } = req.body;
+    if (!userId || points === undefined || !action?.trim()) {
+      res.status(400).json({ success: false, message: 'userId, points and action are required', errors: [] });
+      return;
+    }
+    const adminId = (req as AuthRequest).user.id;
+    const intern = await adminService.adjustPoints({
+      userId: Number(userId), points: Number(points), action: action.trim(), awardedBy: adminId,
+    });
+    res.json({ success: true, data: intern, message: `Points applied to ${intern.name}` });
+  } catch (err: any) {
+    const code = err.message === 'Intern not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const awardBadge = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      res.status(400).json({ success: false, message: 'userId is required', errors: [] });
+      return;
+    }
+    const adminId = (req as AuthRequest).user.id;
+    await adminService.awardBadge(Number(req.params.id), Number(userId), adminId);
+    res.json({ success: true, message: 'Badge awarded.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Cohort Analytics ────────────────────────────────────────────────────────
+
+export const getCohortAnalytics = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.getCohortAnalytics();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Resources ───────────────────────────────────────────────────────────────
+
+export const listResources = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.listResources();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const createResource = async (req: Request, res: Response) => {
+  try {
+    const { title, type, url, owner, status } = req.body;
+    if (!title?.trim()) {
+      res.status(400).json({ success: false, message: 'title is required', errors: [] });
+      return;
+    }
+    const adminId = (req as AuthRequest).user.id;
+    const resource = await adminService.createResource({
+      title: title.trim(), type, url, owner, status, createdBy: adminId,
+    });
+    res.status(201).json({ success: true, data: resource });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const updateResource = async (req: Request, res: Response) => {
+  try {
+    const resource = await adminService.updateResource(Number(req.params.id), req.body);
+    res.json({ success: true, data: resource });
+  } catch (err: any) {
+    const code = err.message === 'Resource not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const deleteResource = async (req: Request, res: Response) => {
+  try {
+    await adminService.deleteResource(Number(req.params.id));
+    res.json({ success: true, message: 'Resource deleted.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Feedback ────────────────────────────────────────────────────────────────
+
+export const listFeedback = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.listFeedback();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const createFeedback = async (req: Request, res: Response) => {
+  try {
+    const { fromName, role, category, comment, rating } = req.body;
+    if (!fromName?.trim() || !comment?.trim()) {
+      res.status(400).json({ success: false, message: 'fromName and comment are required', errors: [] });
+      return;
+    }
+    const data = await adminService.createFeedback({
+      fromName: fromName.trim(),
+      role:     role     || 'admin',
+      category: category || 'General',
+      comment:  comment.trim(),
+      rating:   Number(rating) || 5,
+    });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const updateFeedback = async (req: Request, res: Response) => {
+  try {
+    const { status } = req.body;
+    if (!['new', 'reviewed', 'actioned'].includes(status)) {
+      res.status(400).json({ success: false, message: 'status must be new, reviewed or actioned', errors: [] });
+      return;
+    }
+    await adminService.updateFeedbackStatus(Number(req.params.id), status);
+    res.json({ success: true, message: 'Feedback updated.' });
+  } catch (err: any) {
+    const code = err.message === 'Feedback not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Platform Settings ───────────────────────────────────────────────────────
+
+export const getSettings = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.getSettings();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const updateSettings = async (req: Request, res: Response) => {
+  try {
+    if (!req.body || typeof req.body !== 'object') {
+      res.status(400).json({ success: false, message: 'settings object required', errors: [] });
+      return;
+    }
+    await adminService.updateSettings(req.body);
+    const adminId = (req as AuthRequest).user.id;
+    await adminService.logAuditEvent(adminId, 'settings.update', 'settings', undefined, req.body);
+    res.json({ success: true, message: 'Settings saved.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Audit Log ───────────────────────────────────────────────────────────────
+
+export const getAuditLog = async (req: Request, res: Response) => {
+  try {
+    const limit  = Math.min(Number(req.query.limit)  || 50, 200);
+    const offset = Number(req.query.offset) || 0;
+    const data = await adminService.getAuditLogEntries(limit, offset);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Promote / Demote admin ───────────────────────────────────────────────────
+
+export const promoteUser = async (req: Request, res: Response) => {
+  try {
+    const targetId   = Number(req.params.id);
+    const { admin_role } = req.body as { admin_role: 'admin' | 'super_admin' };
+    if (!['admin', 'super_admin'].includes(admin_role)) {
+      res.status(400).json({ success: false, message: 'admin_role must be admin or super_admin', errors: [] });
+      return;
+    }
+    await adminService.promoteUser(targetId, admin_role);
+    const actorId = (req as AuthRequest).user.id;
+    await adminService.logAuditEvent(actorId, 'user.role_change', 'user', String(targetId), { admin_role });
+    res.json({ success: true, message: `Role updated to ${admin_role}.` });
+  } catch (err: any) {
+    const code = err.message === 'Admin record not found' ? 404 : 500;
     res.status(code).json({ success: false, message: err.message, errors: [] });
   }
 };

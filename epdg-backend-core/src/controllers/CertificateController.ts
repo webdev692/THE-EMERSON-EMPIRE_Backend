@@ -24,7 +24,7 @@ export const issue = async (req: Request, res: Response) => {
       issueDate:   issue_date,
     });
 
-    await adminService.logAuditEvent(adminUserId, 'certificate.issue', 'certificate', cert.certificate_id, { intern_id });
+    await adminService.logAuditEvent(adminUserId, 'certificate.issue', 'certificate', cert.id, { intern_id });
     res.status(201).json({ success: true, data: cert });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });

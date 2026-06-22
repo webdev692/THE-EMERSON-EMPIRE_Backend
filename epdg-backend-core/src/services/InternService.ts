@@ -280,4 +280,447 @@ export class InternService {
       announcements: annResult.rows,
     };
   }
+
+  // ─── Tasks ─────────────────────────────────────────────────────────────────
+
+  async getTasks(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT t.id, t.title, t.description, t.priority, t.status,
+              t.due_date, t.points, t.created_at, t.completed_at
+       FROM tasks t
+       JOIN placements p      ON p.id   = t.placement_id
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE ip.user_id = $1 AND t.deleted_at IS NULL
+       ORDER BY t.due_date ASC NULLS LAST`,
+      [userId],
+    );
+    return rows;
+  }
+
+  async updateTaskStatus(userId: number, taskId: number, newStatus: string) {
+    const pool = getPool();
+    const allowed = ['in_progress', 'review', 'done'];
+    if (!allowed.includes(newStatus)) throw new Error('Invalid status');
+
+    const { rows } = await pool.query(
+      `UPDATE tasks t
+       SET status = $1,
+           completed_at = CASE WHEN $1 = 'done' THEN NOW() ELSE NULL END
+       FROM placements p
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE t.placement_id = p.id
+         AND ip.user_id = $2
+         AND t.id = $3
+         AND t.deleted_at IS NULL
+       RETURNING t.*`,
+      [newStatus, userId, taskId],
+    );
+    if (!rows.length) throw new Error('Task not found or not accessible');
+    return rows[0];
+  }
+
+  // ─── Submissions ───────────────────────────────────────────────────────────
+
+  async getSubmissions(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT s.*, t.title AS task_title
+       FROM submissions s
+       JOIN tasks t ON t.id = s.task_id
+       WHERE s.intern_id = $1
+       ORDER BY s.submitted_at DESC`,
+      [userId],
+    );
+    return rows;
+  }
+
+  async createSubmission(userId: number, data: {
+    taskId:     number;
+    fileUrl:    string;
+    fileName?:  string;
+    fileSizeKb?: number;
+    notes?:     string;
+  }) {
+    const pool = getPool();
+
+    // Verify task belongs to this intern and get placement_id
+    const { rows: taskRows } = await pool.query(
+      `SELECT t.id, t.placement_id
+       FROM tasks t
+       JOIN placements p       ON p.id  = t.placement_id
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE t.id = $1 AND ip.user_id = $2 AND t.deleted_at IS NULL`,
+      [data.taskId, userId],
+    );
+    if (!taskRows.length) throw new Error('Task not found or not accessible');
+    const { placement_id } = taskRows[0];
+
+    const { rows: [sub] } = await pool.query(
+      `INSERT INTO submissions (task_id, placement_id, intern_id, file_url, file_name, file_size_kb, notes, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'submitted')
+       RETURNING *`,
+      [data.taskId, placement_id, userId, data.fileUrl, data.fileName ?? null, data.fileSizeKb ?? null, data.notes ?? null],
+    );
+    return sub;
+  }
+
+  async resubmit(userId: number, submissionId: number, data: {
+    fileUrl:    string;
+    fileName?:  string;
+    fileSizeKb?: number;
+    notes?:     string;
+  }) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `UPDATE submissions
+       SET file_url = $1, file_name = $2, file_size_kb = $3, notes = $4,
+           status = 'submitted', reviewer_comment = NULL,
+           reviewed_by = NULL, reviewed_at = NULL, submitted_at = NOW()
+       WHERE id = $5 AND intern_id = $6 AND status = 'rejected'
+       RETURNING *`,
+      [data.fileUrl, data.fileName ?? null, data.fileSizeKb ?? null, data.notes ?? null, submissionId, userId],
+    );
+    if (!rows.length) throw new Error('Submission not found or cannot be resubmitted');
+    return rows[0];
+  }
+
+  // ─── Leaderboard ──────────────────────────────────────────────────────────
+
+  async getLeaderboard(period: 'week' | 'alltime' = 'alltime') {
+    const pool = getPool();
+    const since = period === 'week'
+      ? `AND pe.created_at >= NOW() - INTERVAL '7 days'`
+      : '';
+
+    const { rows } = await pool.query(
+      `SELECT
+         u.id,
+         u.name,
+         COALESCE(ip.department, 'General') AS department,
+         COALESCE(SUM(pe.points) FILTER (WHERE 1=1 ${since}), 0)::int AS total_points,
+         RANK() OVER (ORDER BY COALESCE(SUM(pe.points) FILTER (WHERE 1=1 ${since}), 0) DESC)::int AS rank
+       FROM users u
+       JOIN intern_profiles ip ON ip.user_id = u.id
+       LEFT JOIN point_events pe ON pe.user_id = u.id
+       WHERE u.role = 'intern' AND u.deleted_at IS NULL AND ip.is_approved = true
+       GROUP BY u.id, u.name, ip.department
+       ORDER BY total_points DESC
+       LIMIT 50`,
+    );
+    return rows;
+  }
+
+  async getMyRank(userId: number, period: 'week' | 'alltime' = 'alltime') {
+    const pool = getPool();
+    const since = period === 'week' ? `AND pe.created_at >= NOW() - INTERVAL '7 days'` : '';
+
+    // Overall rank
+    const { rows: rankRows } = await pool.query(
+      `SELECT rank, total_points FROM (
+         SELECT
+           u.id,
+           COALESCE(SUM(pe.points), 0)::int AS total_points,
+           RANK() OVER (ORDER BY COALESCE(SUM(pe.points), 0) DESC)::int AS rank
+         FROM users u
+         JOIN intern_profiles ip ON ip.user_id = u.id
+         LEFT JOIN point_events pe ON pe.user_id = u.id ${since.replace('AND', 'AND')}
+         WHERE u.role = 'intern' AND u.deleted_at IS NULL AND ip.is_approved = true
+         GROUP BY u.id
+       ) sub WHERE id = $1`,
+      [userId],
+    );
+
+    // Points breakdown by action category
+    const { rows: breakdown } = await pool.query(
+      `SELECT
+         CASE
+           WHEN action ILIKE '%task%'   OR action ILIKE '%submission%' THEN 'Tasks'
+           WHEN action ILIKE '%streak%' OR action ILIKE '%login%'      THEN 'Streak'
+           WHEN action ILIKE '%session%' OR action ILIKE '%sync%'      THEN 'Syncs'
+           ELSE 'Other'
+         END AS category,
+         SUM(points)::int AS points
+       FROM point_events
+       WHERE user_id = $1
+       GROUP BY category`,
+      [userId],
+    );
+
+    return {
+      rank:        rankRows[0]?.rank        ?? 0,
+      total_points: rankRows[0]?.total_points ?? 0,
+      breakdown,
+    };
+  }
+
+  // ─── Badges ───────────────────────────────────────────────────────────────
+
+  async getBadges(userId: number) {
+    const pool = getPool();
+    // All badges + earned flag
+    const { rows } = await pool.query(
+      `SELECT b.id, b.name, b.emoji, b.description,
+              ba.awarded_at,
+              (ba.id IS NOT NULL) AS earned
+       FROM badges b
+       LEFT JOIN badge_awards ba ON ba.badge_id = b.id AND ba.user_id = $1
+       ORDER BY earned DESC, b.id ASC`,
+      [userId],
+    );
+    return rows;
+  }
+
+  // ─── Feedback ─────────────────────────────────────────────────────────────
+
+  async submitFeedback(userId: number, data: {
+    type:    'programme' | 'mentor' | 'suggestion';
+    rating:  number;
+    comment: string;
+    name:    string;
+  }) {
+    const pool = getPool();
+    const isAnonymous = data.type === 'suggestion';
+    const { rows: [fb] } = await pool.query(
+      `INSERT INTO feedback (from_name, role, category, comment, rating, user_id)
+       VALUES ($1, 'intern', $2, $3, $4, $5)
+       RETURNING id`,
+      [
+        isAnonymous ? 'Anonymous' : data.name,
+        data.type,
+        data.comment,
+        data.rating,
+        isAnonymous ? null : userId,
+      ],
+    );
+    return fb;
+  }
+
+  async getReceivedFeedback(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT f.id, f.from_name, f.category, f.comment, f.rating, f.created_at
+       FROM feedback f
+       WHERE f.target_user_id = $1
+       ORDER BY f.created_at DESC
+       LIMIT 20`,
+      [userId],
+    );
+    return rows;
+  }
+
+  // ─── Roadmap ──────────────────────────────────────────────────────────────
+
+  async getRoadmap(userId: number) {
+    const pool = getPool();
+
+    // Get intern's onboarding step to determine current week
+    const { rows: profileRows } = await pool.query(
+      `SELECT onboarding_complete, onboarding_step FROM intern_profiles WHERE user_id = $1`,
+      [userId],
+    );
+    const profile = profileRows[0];
+    const onboardingComplete = profile?.onboarding_complete ?? false;
+
+    // Ensure progress rows exist for this intern
+    await pool.query(
+      `INSERT INTO intern_roadmap_progress (intern_id, week_id, status)
+       SELECT $1, rw.id,
+         CASE
+           WHEN rw.week_number = 1 AND $2 THEN 'current'
+           WHEN rw.week_number = 1        THEN 'locked'
+           ELSE 'locked'
+         END
+       FROM roadmap_weeks rw
+       ON CONFLICT (intern_id, week_id) DO NOTHING`,
+      [userId, onboardingComplete],
+    );
+
+    const { rows } = await pool.query(
+      `SELECT rw.id, rw.week_number, rw.title, rw.description, rw.skills,
+              irp.status, irp.completed_at
+       FROM roadmap_weeks rw
+       LEFT JOIN intern_roadmap_progress irp
+         ON irp.week_id = rw.id AND irp.intern_id = $1
+       ORDER BY rw.week_number ASC`,
+      [userId],
+    );
+
+    const total     = rows.length;
+    const completed = rows.filter(r => r.status === 'completed').length;
+    const pct       = total > 0 ? Math.round((completed / total) * 100) : 0;
+    const currentWeek = rows.find(r => r.status === 'current')?.week_number ?? 1;
+
+    return { weeks: rows, completion_pct: pct, current_week: currentWeek, total_weeks: total };
+  }
+
+  // ─── Mentor & Sessions ────────────────────────────────────────────────────
+
+  async getMentor(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT u.id AS mentor_id, u.name AS mentor_name, u.email AS mentor_email,
+              ip_mentor.department AS mentor_department,
+              ip_mentor.bio        AS mentor_bio,
+              ip_mentor.skills     AS mentor_skills,
+              p.id                 AS placement_id
+       FROM intern_profiles ip
+       JOIN placements p       ON p.intern_id = ip.id AND p.status = 'active'
+       JOIN users u            ON u.id = p.mentor_id
+       LEFT JOIN intern_profiles ip_mentor ON ip_mentor.user_id = u.id
+       WHERE ip.user_id = $1 AND u.deleted_at IS NULL
+       LIMIT 1`,
+      [userId],
+    );
+    return rows[0] ?? null;
+  }
+
+  async getMentorSessions(userId: number) {
+    const pool = getPool();
+    const now = new Date().toISOString();
+
+    const [upcoming, past] = await Promise.all([
+      pool.query(
+        `SELECT ms.id, ms.scheduled_at, ms.status, ms.notes, ms.intern_rating,
+                u.name AS mentor_name
+         FROM mentor_sessions ms
+         JOIN users u ON u.id = ms.mentor_id
+         WHERE ms.intern_id = $1 AND ms.scheduled_at >= $2
+         ORDER BY ms.scheduled_at ASC LIMIT 10`,
+        [userId, now],
+      ),
+      pool.query(
+        `SELECT ms.id, ms.scheduled_at, ms.status, ms.notes, ms.intern_rating,
+                ms.mentor_notes, u.name AS mentor_name
+         FROM mentor_sessions ms
+         JOIN users u ON u.id = ms.mentor_id
+         WHERE ms.intern_id = $1 AND ms.scheduled_at < $2
+         ORDER BY ms.scheduled_at DESC LIMIT 20`,
+        [userId, now],
+      ),
+    ]);
+    return { upcoming: upcoming.rows, past: past.rows };
+  }
+
+  async requestMentorSession(userId: number, data: { scheduledAt: string; notes?: string }) {
+    const pool = getPool();
+
+    // Get active placement + mentor
+    const { rows: pRows } = await pool.query(
+      `SELECT p.id AS placement_id, p.mentor_id
+       FROM intern_profiles ip
+       JOIN placements p ON p.intern_id = ip.id AND p.status = 'active'
+       WHERE ip.user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    if (!pRows.length) throw new Error('No active placement found');
+    const { placement_id, mentor_id } = pRows[0];
+    if (!mentor_id) throw new Error('No mentor assigned to your placement');
+
+    const { rows: [session] } = await pool.query(
+      `INSERT INTO mentor_sessions (placement_id, mentor_id, intern_id, scheduled_at, status, notes)
+       VALUES ($1, $2, $3, $4, 'pending', $5)
+       RETURNING *`,
+      [placement_id, mentor_id, userId, data.scheduledAt, data.notes ?? null],
+    );
+    return session;
+  }
+
+  async rateMentorSession(userId: number, sessionId: number, rating: number, notes?: string) {
+    const pool = getPool();
+    if (rating < 1 || rating > 5) throw new Error('Rating must be 1–5');
+    const { rows } = await pool.query(
+      `UPDATE mentor_sessions
+       SET intern_rating = $1, mentor_notes = $2
+       WHERE id = $3 AND intern_id = $4
+       RETURNING *`,
+      [rating, notes ?? null, sessionId, userId],
+    );
+    if (!rows.length) throw new Error('Session not found');
+    return rows[0];
+  }
+
+  // ─── Progress ─────────────────────────────────────────────────────────────
+
+  async getProgressStats(userId: number) {
+    const pool = getPool();
+
+    // Task stats
+    const { rows: taskRows } = await pool.query(
+      `SELECT
+         COUNT(*)::int                                                  AS total,
+         COUNT(*) FILTER (WHERE t.status = 'done')::int                AS done,
+         COUNT(*) FILTER (WHERE t.status = 'done'
+                            AND t.completed_at <= t.due_date)::int     AS ontime,
+         COALESCE(SUM(t.points) FILTER (WHERE t.status='done'), 0)::int AS points
+       FROM tasks t
+       JOIN placements p       ON p.id  = t.placement_id
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE ip.user_id = $1 AND t.deleted_at IS NULL`,
+      [userId],
+    );
+    const ts = taskRows[0];
+    const ontime_pct = ts.done > 0 ? Math.round((ts.ontime / ts.done) * 100) : 0;
+
+    // Weekly task completion (last 4 weeks)
+    const { rows: weeklyRows } = await pool.query(
+      `SELECT
+         TO_CHAR(DATE_TRUNC('week', t.completed_at), 'Mon DD') AS week_label,
+         COUNT(*)::int AS count
+       FROM tasks t
+       JOIN placements p       ON p.id  = t.placement_id
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE ip.user_id = $1
+         AND t.status = 'done'
+         AND t.completed_at >= NOW() - INTERVAL '4 weeks'
+         AND t.deleted_at IS NULL
+       GROUP BY DATE_TRUNC('week', t.completed_at)
+       ORDER BY DATE_TRUNC('week', t.completed_at) ASC`,
+      [userId],
+    );
+
+    // Session count + avg rating
+    const { rows: sessionRows } = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              ROUND(AVG(intern_rating)::numeric, 1) AS avg_rating
+       FROM mentor_sessions
+       WHERE intern_id = $1 AND scheduled_at < NOW()`,
+      [userId],
+    );
+
+    // Milestones (per placement)
+    const { rows: milestoneRows } = await pool.query(
+      `SELECT m.title, m.is_completed
+       FROM milestones m
+       JOIN placements p       ON p.id  = m.placement_id
+       JOIN intern_profiles ip ON ip.id = p.intern_id
+       WHERE ip.user_id = $1
+       ORDER BY m.due_week ASC, m.id ASC`,
+      [userId],
+    );
+
+    return {
+      tasks: {
+        total:     ts.total,
+        done:      ts.done,
+        ontime_pct,
+        points:    ts.points,
+      },
+      weekly: weeklyRows,
+      sessions: {
+        total:      sessionRows[0]?.total      ?? 0,
+        avg_rating: sessionRows[0]?.avg_rating ?? null,
+      },
+      milestones: milestoneRows,
+    };
+  }
+
+  async getSkills(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT skill_name, proficiency FROM intern_skills WHERE intern_id = $1 ORDER BY proficiency DESC`,
+      [userId],
+    );
+    return rows;
+  }
 }

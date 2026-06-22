@@ -1,6 +1,10 @@
 import { Request, Response } from 'express';
+import path from 'path';
 import { AuthRequest } from '../middlewares/auth';
 import { InternService } from '../services/InternService';
+import { getSupabase } from '../utils/supabaseClient';
+
+const SUBMISSION_BUCKET = 'submissions';
 
 const internService = new InternService();
 
@@ -65,5 +69,280 @@ export const completeOnboardingStep = async (req: Request, res: Response) => {
   } catch (err: any) {
     const code = err.message?.includes('not the current step') ? 400 : 500;
     res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Tasks ──────────────────────────────────────────────────────────────────
+
+export const getTasks = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getTasks(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const updateTaskStatus = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const taskId = Number(req.params.id);
+    const { status } = req.body;
+    if (!status) {
+      res.status(400).json({ success: false, message: 'status is required', errors: [] });
+      return;
+    }
+    const data = await internService.updateTaskStatus(userId, taskId, status);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : err.message.includes('Invalid') ? 400 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Submissions ────────────────────────────────────────────────────────────
+
+export const getSubmissions = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getSubmissions(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const createSubmission = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { task_id, file_url, file_name, file_size_kb, notes } = req.body;
+    if (!task_id || !file_url) {
+      res.status(400).json({ success: false, message: 'task_id and file_url are required', errors: [] });
+      return;
+    }
+    const data = await internService.createSubmission(userId, {
+      taskId:     Number(task_id),
+      fileUrl:    file_url,
+      fileName:   file_name,
+      fileSizeKb: file_size_kb ? Number(file_size_kb) : undefined,
+      notes,
+    });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const resubmit = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const submissionId = Number(req.params.id);
+    const { file_url, file_name, file_size_kb, notes } = req.body;
+    if (!file_url) {
+      res.status(400).json({ success: false, message: 'file_url is required', errors: [] });
+      return;
+    }
+    const data = await internService.resubmit(userId, submissionId, {
+      fileUrl: file_url, fileName: file_name, fileSizeKb: file_size_kb, notes,
+    });
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Leaderboard ────────────────────────────────────────────────────────────
+
+export const getLeaderboard = async (req: Request, res: Response) => {
+  try {
+    const period = (req.query.period as 'week' | 'alltime') || 'alltime';
+    const data = await internService.getLeaderboard(period);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getMyRank = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const period = (req.query.period as 'week' | 'alltime') || 'alltime';
+    const data = await internService.getMyRank(userId, period);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getBadges = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getBadges(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Feedback ───────────────────────────────────────────────────────────────
+
+export const submitFeedback = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { type, rating, comment, name } = req.body;
+    if (!type || !comment) {
+      res.status(400).json({ success: false, message: 'type and comment are required', errors: [] });
+      return;
+    }
+    const data = await internService.submitFeedback(userId, { type, rating: Number(rating) || 5, comment, name: name || 'Intern' });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getReceivedFeedback = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getReceivedFeedback(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Roadmap ────────────────────────────────────────────────────────────────
+
+export const getRoadmap = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getRoadmap(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Mentor & Sessions ──────────────────────────────────────────────────────
+
+export const getMentor = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getMentor(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getMentorSessions = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getMentorSessions(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const requestMentorSession = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { date, time, notes } = req.body;
+    if (!date || !time) {
+      res.status(400).json({ success: false, message: 'date and time are required', errors: [] });
+      return;
+    }
+    const scheduledAt = `${date}T${time}:00`;
+    const data = await internService.requestMentorSession(userId, { scheduledAt, notes });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('No active') || err.message.includes('No mentor') ? 400 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const rateMentorSession = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const sessionId = Number(req.params.id);
+    const { rating, notes } = req.body;
+    if (!rating) {
+      res.status(400).json({ success: false, message: 'rating is required', errors: [] });
+      return;
+    }
+    const data = await internService.rateMentorSession(userId, sessionId, Number(rating), notes);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── Progress ───────────────────────────────────────────────────────────────
+
+export const getProgressStats = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getProgressStats(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getSkills = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data = await internService.getSkills(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ── File Upload ────────────────────────────────────────────────────────────
+
+export const uploadSubmissionFile = async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ success: false, message: 'No file uploaded.' });
+      return;
+    }
+    const { buffer, originalname, mimetype } = req.file;
+    const ext     = path.extname(originalname).toLowerCase();
+    const allowed = ['.pdf', '.zip', '.png', '.jpg', '.jpeg', '.docx'];
+    if (!allowed.includes(ext)) {
+      res.status(400).json({ success: false, message: 'File type not allowed.' });
+      return;
+    }
+
+    const supabase = getSupabase();
+    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    const filePath = `intern-submissions/${fileName}`;
+
+    await supabase.storage.createBucket(SUBMISSION_BUCKET, {
+      public: true,
+      fileSizeLimit: 20 * 1024 * 1024,
+    }).catch(() => { /* bucket already exists */ });
+
+    const { error: uploadErr } = await supabase.storage
+      .from(SUBMISSION_BUCKET)
+      .upload(filePath, buffer, { contentType: mimetype, upsert: false });
+    if (uploadErr) throw uploadErr;
+
+    const { data } = supabase.storage.from(SUBMISSION_BUCKET).getPublicUrl(filePath);
+
+    res.json({
+      success: true,
+      url:     data.publicUrl,
+      name:    originalname,
+      sizeKb:  Math.ceil(buffer.length / 1024),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message || 'Upload failed.' });
   }
 };

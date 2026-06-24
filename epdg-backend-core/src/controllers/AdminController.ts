@@ -315,7 +315,7 @@ export const deleteSlot = async (req: Request, res: Response) => {
 // POST /api/admin/users  — manually create a user
 export const createUser = async (req: Request, res: Response) => {
   try {
-    const { name, email, password, role, admin_type, department, max_capacity } = req.body;
+    const { name, email, role, admin_type, department, max_capacity } = req.body;
 
     if (!name || !email || !role) {
       res.status(400).json({ success: false, message: 'name, email and role are required.', errors: [] });
@@ -327,13 +327,8 @@ export const createUser = async (req: Request, res: Response) => {
       return;
     }
 
-    if (role !== 'admin' && !password) {
-      res.status(400).json({ success: false, message: 'password is required for non-admin roles.', errors: [] });
-      return;
-    }
-
     const user = await adminService.createUser({
-      name, email, password, role,
+      name, email, role,
       admin_type:   admin_type   || undefined,
       department:   department   || undefined,
       max_capacity: max_capacity ? Number(max_capacity) : undefined,

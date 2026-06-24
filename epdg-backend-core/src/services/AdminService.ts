@@ -223,7 +223,7 @@ export class AdminService {
   // ─── Create user manually ────────────────────────────────────────────────────
 
   async createUser(data: {
-    name: string; email: string; password?: string;
+    name: string; email: string;
     role: 'admin' | 'company' | 'intern' | 'school';
     admin_type?: 'general' | 'mentor' | 'technical_support' | 'operations';
     department?: string;
@@ -239,10 +239,7 @@ export class AdminService {
       );
       if (existing.rows.length) throw new Error('Email already in use.');
 
-      // Auto-generate password for admins; require it for all other roles
-      const plainPassword = data.role === 'admin'
-        ? generateTempPassword()
-        : data.password!;
+      const plainPassword = generateTempPassword();
 
       const hashed = await bcrypt.hash(plainPassword, 12);
       const { rows } = await client.query(
@@ -266,6 +263,8 @@ export class AdminService {
         );
 
         this.sendAdminWelcomeEmail(data.email, data.name, plainPassword, adminType, dept);
+      } else {
+        this.sendUserWelcomeEmail(data.email, data.name, plainPassword, data.role);
       }
 
       await client.query('COMMIT');
@@ -1106,6 +1105,44 @@ export class AdminService {
     `;
     this.sendMail(to, 'Application Update — Emerson Professional', body).catch((e) =>
       logger.error('rejection email failed', e)
+    );
+  }
+
+  private sendUserWelcomeEmail(to: string, name: string, password: string, role: string) {
+    const ROLE_LABELS: Record<string, string> = {
+      intern:  'Intern',
+      company: 'Company',
+      school:  'Institution',
+    };
+    const roleLabel = ROLE_LABELS[role] || role;
+    const loginUrl  = `${FRONTEND()}/login`;
+    const body = `
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        Hi <strong>${name}</strong>, an account has been created for you on the
+        Emerson Professional Development platform as a <strong>${roleLabel}</strong>.
+      </p>
+      <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
+        <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
+      </div>
+      <p style="font-size:14px;color:#dc2626;font-weight:bold;">
+        ⚠️ Please change your password after your first login.
+      </p>
+      <p style="font-size:14px;color:#555;">
+        If you did not expect this email, please contact
+        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+      </p>
+      <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
+        <tr><td style="background:#4B1E91;border-radius:8px;">
+          <a href="${loginUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            Log In Now
+          </a>
+        </td></tr>
+      </table>
+    `;
+    this.sendMail(to, `👋 Welcome to Emerson — Your ${roleLabel} Account is Ready`, body).catch((e) =>
+      logger.error('user welcome email failed', e)
     );
   }
 

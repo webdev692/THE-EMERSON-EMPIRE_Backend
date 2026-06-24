@@ -315,10 +315,10 @@ export const deleteSlot = async (req: Request, res: Response) => {
 // POST /api/admin/users  — manually create a user
 export const createUser = async (req: Request, res: Response) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, admin_type, department, max_capacity } = req.body;
 
-    if (!name || !email || !password || !role) {
-      res.status(400).json({ success: false, message: 'name, email, password and role are required.', errors: [] });
+    if (!name || !email || !role) {
+      res.status(400).json({ success: false, message: 'name, email and role are required.', errors: [] });
       return;
     }
 
@@ -327,7 +327,17 @@ export const createUser = async (req: Request, res: Response) => {
       return;
     }
 
-    const user = await adminService.createUser({ name, email, password, role });
+    if (role !== 'admin' && !password) {
+      res.status(400).json({ success: false, message: 'password is required for non-admin roles.', errors: [] });
+      return;
+    }
+
+    const user = await adminService.createUser({
+      name, email, password, role,
+      admin_type:   admin_type   || undefined,
+      department:   department   || undefined,
+      max_capacity: max_capacity ? Number(max_capacity) : undefined,
+    });
     res.status(201).json({ success: true, data: user });
   } catch (err: any) {
     const code = err.message?.includes('already') ? 409 : 500;
@@ -343,6 +353,39 @@ export const listPlacements = async (req: Request, res: Response) => {
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const getPlaceableInterns = async (req: Request, res: Response) => {
+  try {
+    const data = await adminService.getPlaceableInterns();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+export const createPlacement = async (req: Request, res: Response) => {
+  try {
+    const { application_id, intern_id, company_id, school_id, slot_id, mentor_id, start_date, end_date } = req.body;
+    if (!application_id || !intern_id || !company_id || !slot_id || !start_date || !end_date) {
+      res.status(400).json({ success: false, message: 'application_id, intern_id, company_id, slot_id, start_date and end_date are required', errors: [] });
+      return;
+    }
+    const data = await adminService.createPlacement({
+      application_id: Number(application_id),
+      intern_id:      Number(intern_id),
+      company_id:     Number(company_id),
+      school_id:      school_id ? Number(school_id) : null,
+      slot_id:        Number(slot_id),
+      mentor_id:      mentor_id ? Number(mentor_id) : null,
+      start_date, end_date,
+    });
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') || err.message.includes('not approved') ? 404
+               : err.message.includes('already exists') ? 409 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
   }
 };
 

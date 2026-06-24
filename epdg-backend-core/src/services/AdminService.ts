@@ -1,7 +1,14 @@
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { Resend } from 'resend';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
+
+function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+  const bytes = crypto.randomBytes(12);
+  return Array.from(bytes).map((b) => chars[b % chars.length]).join('');
+}
 
 function getResend() {
   if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY not set');
@@ -216,17 +223,130 @@ export class AdminService {
   // ─── Create user manually ────────────────────────────────────────────────────
 
   async createUser(data: {
-    name: string; email: string; password: string;
+    name: string; email: string; password?: string;
     role: 'admin' | 'company' | 'intern' | 'school';
+    admin_type?: 'general' | 'mentor' | 'technical_support' | 'operations';
+    department?: string;
+    max_capacity?: number;
   }) {
     const pool   = getPool();
-    const hashed = await bcrypt.hash(data.password, 12);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const existing = await client.query(
+        'SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL', [data.email]
+      );
+      if (existing.rows.length) throw new Error('Email already in use.');
+
+      // Auto-generate password for admins; require it for all other roles
+      const plainPassword = data.role === 'admin'
+        ? generateTempPassword()
+        : data.password!;
+
+      const hashed = await bcrypt.hash(plainPassword, 12);
+      const { rows } = await client.query(
+        `INSERT INTO users (name, email, password, role, is_verified, created_at)
+         VALUES ($1, $2, $3, $4::user_role, true, NOW())
+         RETURNING id, name, email, role, is_verified, created_at`,
+        [data.name, data.email, hashed, data.role]
+      );
+      const user = rows[0];
+
+      if (data.role === 'admin') {
+        const adminType  = data.admin_type  || 'general';
+        const isMentor   = adminType === 'mentor';
+        const dept       = data.department  || null;
+        const maxCap     = data.max_capacity || 3;
+
+        await client.query(
+          `INSERT INTO admins (user_id, admin_role, is_mentor, admin_type, department, max_capacity, force_password_change, created_at)
+           VALUES ($1, 'admin', $2, $3, $4, $5, TRUE, NOW())`,
+          [user.id, isMentor, adminType, dept, maxCap]
+        );
+
+        this.sendAdminWelcomeEmail(data.email, data.name, plainPassword, adminType, dept);
+      }
+
+      await client.query('COMMIT');
+      return user;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ─── Placements ──────────────────────────────────────────────────────────────
+
+  async getPlaceableInterns() {
+    const pool = getPool();
+    const { rows } = await pool.query(`
+      SELECT
+        a.id               AS application_id,
+        u.id               AS user_id,
+        u.name             AS intern_name,
+        u.email            AS intern_email,
+        ip.id              AS intern_profile_id,
+        s.id               AS slot_id,
+        s.title            AS slot_title,
+        s.department,
+        s.duration_weeks,
+        c.id               AS company_id,
+        c.company_name,
+        sc.id              AS school_id
+      FROM applications a
+      JOIN intern_profiles  ip ON ip.id  = a.intern_id
+      JOIN users            u  ON u.id   = ip.user_id
+      JOIN internship_slots s  ON s.id   = a.slot_id
+      JOIN companies        c  ON c.id   = s.company_id
+      LEFT JOIN schools     sc ON sc.user_id = u.id
+      WHERE a.status = 'approved'
+        AND u.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM placements p WHERE p.application_id = a.id
+        )
+      ORDER BY u.name
+    `);
+    return rows;
+  }
+
+  async createPlacement(data: {
+    application_id: number;
+    intern_id: number;
+    company_id: number;
+    school_id: number | null;
+    slot_id: number;
+    mentor_id: number | null;
+    start_date: string;
+    end_date: string;
+  }) {
+    const pool = getPool();
+
+    // Verify application exists and is approved
+    const appCheck = await pool.query(
+      `SELECT id FROM applications WHERE id = $1 AND status = 'approved'`,
+      [data.application_id]
+    );
+    if (!appCheck.rows.length) throw new Error('Application not found or not approved.');
+
+    // Prevent duplicate placement
+    const dupCheck = await pool.query(
+      `SELECT id FROM placements WHERE application_id = $1`, [data.application_id]
+    );
+    if (dupCheck.rows.length) throw new Error('A placement already exists for this application.');
 
     const { rows } = await pool.query(
-      `INSERT INTO users (name, email, password, role, is_verified, created_at)
-       VALUES ($1, $2, $3, $4::user_role, true, NOW())
-       RETURNING id, name, email, role, is_verified, created_at`,
-      [data.name, data.email, hashed, data.role]
+      `INSERT INTO placements
+         (application_id, intern_id, company_id, school_id, slot_id, mentor_id, start_date, end_date, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', NOW())
+       RETURNING id`,
+      [
+        data.application_id, data.intern_id, data.company_id,
+        data.school_id || null, data.slot_id,
+        data.mentor_id || null, data.start_date, data.end_date,
+      ]
     );
     return rows[0];
   }
@@ -986,6 +1106,50 @@ export class AdminService {
     `;
     this.sendMail(to, 'Application Update — Emerson Professional', body).catch((e) =>
       logger.error('rejection email failed', e)
+    );
+  }
+
+  private sendAdminWelcomeEmail(
+    to: string, name: string, password: string,
+    adminType: string, department: string | null
+  ) {
+    const TITLES: Record<string, string> = {
+      general:           'General Admin',
+      mentor:            'Mentor',
+      technical_support: 'Technical Support Admin',
+      operations:        'Operations / Deputy Admin',
+    };
+    const title    = TITLES[adminType] || 'Admin';
+    const loginUrl = `${FRONTEND()}/login`;
+    const body = `
+      <p style="font-size:15px;color:#555;line-height:1.6;">
+        Hi <strong>${name}</strong>, an admin account has been created for you on the
+        Emerson Professional Development platform.
+      </p>
+      <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
+        <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🏷️ Role: <strong>${title}</strong></p>
+        ${department ? `<p style="margin:4px 0 0;font-size:13px;color:#6b7280;">Department: ${department}</p>` : ''}
+      </div>
+      <p style="font-size:14px;color:#dc2626;font-weight:bold;">
+        ⚠️ You will be asked to set a new password on your first login.
+      </p>
+      <p style="font-size:14px;color:#555;">
+        If you did not expect this email, please contact
+        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+      </p>
+      <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
+        <tr><td style="background:#4B1E91;border-radius:8px;">
+          <a href="${loginUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            Log In &amp; Set Password
+          </a>
+        </td></tr>
+      </table>
+    `;
+    this.sendMail(to, `👋 Welcome to Emerson — Your ${title} Account is Ready`, body).catch((e) =>
+      logger.error('admin welcome email failed', e)
     );
   }
 

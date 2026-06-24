@@ -136,8 +136,10 @@ router.patch('/certificates/:id/revoke', superAdminGuard, CertificateController.
 router.get('/certificate-templates',          CertificateController.listTemplates);
 
 // Placements
-router.get('/placements',            AdminController.listPlacements);
-router.patch('/placements/:id/end',  AdminController.endPlacement);
+router.get('/placements',                   AdminController.listPlacements);
+router.get('/placements/placeable-interns', AdminController.getPlaceableInterns);
+router.post('/placements',                  AdminController.createPlacement);
+router.patch('/placements/:id/end',         AdminController.endPlacement);
 
 // Announcements
 router.get('/announcements',  AdminController.listAnnouncements);

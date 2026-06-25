@@ -673,6 +673,35 @@ export class InternService {
     return rows;
   }
 
+  // ─── Mentors directory ────────────────────────────────────────────────────
+
+  async getMentorsDirectory() {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT
+         u.id,
+         u.name,
+         u.email,
+         a.max_capacity,
+         COUNT(ip.id)::int                                              AS intern_count,
+         COALESCE(
+           json_agg(DISTINCT ip.track) FILTER (WHERE ip.track IS NOT NULL),
+           '[]'
+         )                                                              AS tracks
+       FROM users u
+       JOIN admins a ON a.user_id = u.id
+       LEFT JOIN intern_profiles ip
+         ON ip.mentor_name = u.name
+         AND ip.is_approved = true
+         AND ip.deleted_at IS NULL
+       WHERE a.admin_type = 'mentor'
+         AND u.deleted_at IS NULL
+       GROUP BY u.id, u.name, u.email, a.max_capacity
+       ORDER BY u.name ASC`
+    );
+    return rows;
+  }
+
   // ─── Roadmap ──────────────────────────────────────────────────────────────
 
   async getRoadmap(userId: number) {

@@ -294,6 +294,16 @@ export const getReceivedFeedback = async (req: Request, res: Response) => {
   }
 };
 
+// GET /api/intern/mentors-directory
+export const getMentorsDirectory = async (req: Request, res: Response) => {
+  try {
+    const data = await internService.getMentorsDirectory();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
 // ── Roadmap ────────────────────────────────────────────────────────────────
 
 export const getRoadmap = async (req: Request, res: Response) => {

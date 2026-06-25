@@ -63,6 +63,9 @@ router.post('/roadmap/modules/:id/complete',  roleGuard('intern'), InternControl
 router.post('/roadmap/request-level-up',      roleGuard('intern'), InternController.requestLevelUp);
 router.get('/roadmap',                        roleGuard('intern'), InternController.getRoadmap);
 
+// Mentors directory (all mentors + specializations)
+router.get('/mentors-directory', roleGuard('intern'), InternController.getMentorsDirectory);
+
 // Mentor & Sessions
 router.get('/mentor',                        roleGuard('intern'), InternController.getMentor);
 router.get('/mentor/sessions',               roleGuard('intern'), InternController.getMentorSessions);

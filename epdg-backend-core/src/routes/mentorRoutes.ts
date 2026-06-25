@@ -7,7 +7,8 @@ const router = Router();
 router.use(authMiddleware);
 router.use(roleGuard('admin'));
 
-router.get('/stats',   MentorController.getStats);
-router.get('/interns', MentorController.getMyInterns);
+router.get('/stats',                               MentorController.getStats);
+router.get('/interns',                             MentorController.getMyInterns);
+router.patch('/interns/:userId/activate-roadmap',  MentorController.activateRoadmap);
 
 export default router;

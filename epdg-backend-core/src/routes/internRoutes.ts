@@ -32,6 +32,11 @@ router.get('/slots',        roleGuard('intern'), ApplicationController.getOpenSl
 router.post('/apply',       roleGuard('intern'), ApplicationController.apply);
 router.get('/applications', roleGuard('intern'), ApplicationController.getMyApplications);
 
+// Opportunities (gigs / jobs) — /applications must come before /:id/apply
+router.get('/opportunities/applications',  roleGuard('intern'), InternController.getMyOpportunityApplications);
+router.get('/opportunities',               roleGuard('intern'), InternController.getOpportunities);
+router.post('/opportunities/:id/apply',    roleGuard('intern'), InternController.applyToOpportunity);
+
 // Tasks
 router.get('/tasks',         roleGuard('intern'), InternController.getTasks);
 router.patch('/tasks/:id',   roleGuard('intern'), InternController.updateTaskStatus);
@@ -53,8 +58,10 @@ router.get('/badges', roleGuard('intern'), InternController.getBadges);
 router.post('/feedback',          roleGuard('intern'), InternController.submitFeedback);
 router.get('/feedback/received',  roleGuard('intern'), InternController.getReceivedFeedback);
 
-// Roadmap
-router.get('/roadmap', roleGuard('intern'), InternController.getRoadmap);
+// Roadmap — module completion + level-up must come before /roadmap to avoid route conflicts
+router.post('/roadmap/modules/:id/complete',  roleGuard('intern'), InternController.completeModule);
+router.post('/roadmap/request-level-up',      roleGuard('intern'), InternController.requestLevelUp);
+router.get('/roadmap',                        roleGuard('intern'), InternController.getRoadmap);
 
 // Mentor & Sessions
 router.get('/mentor',                        roleGuard('intern'), InternController.getMentor);

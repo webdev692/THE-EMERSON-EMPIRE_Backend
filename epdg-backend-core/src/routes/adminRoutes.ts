@@ -173,4 +173,16 @@ router.patch('/settings', superAdminGuard, AdminController.updateSettings);
 // Audit log
 router.get('/audit-log', AdminController.getAuditLog);
 
+// Opportunities (gigs / jobs)
+router.get('/opportunities',                         AdminController.listOpportunities);
+router.post('/opportunities',                        AdminController.createOpportunity);
+router.patch('/opportunities/:id',                   AdminController.updateOpportunity);
+router.get('/opportunities/applications',            AdminController.listOpportunityApplications);
+router.patch('/opportunities/applications/:id',      AdminController.reviewOpportunityApplication);
+
+// Roadmap admin — sign-off and level-up approval
+router.get('/roadmap/pending-level-ups',             AdminController.listPendingLevelUps);
+router.patch('/roadmap/level-up',                    AdminController.approveInternLevelUp);
+router.patch('/roadmap/modules/:moduleId/sign-off',  AdminController.signOffModule);
+
 export default router;

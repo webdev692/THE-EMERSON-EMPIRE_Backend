@@ -1,10 +1,14 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import { AdminService } from '../services/AdminService';
+import { OpportunityService } from '../services/OpportunityService';
+import { RoadmapService } from '../services/RoadmapService';
 import { parseCvFromUrl } from '../utils/cvParser';
 import { getPool } from '../db';
 
-const adminService = new AdminService();
+const adminService       = new AdminService();
+const opportunityService = new OpportunityService();
+const roadmapService     = new RoadmapService();
 
 // GET /api/admin/stats
 export const getStats = async (req: Request, res: Response) => {
@@ -651,6 +655,138 @@ export const promoteUser = async (req: Request, res: Response) => {
     res.json({ success: true, message: `Role updated to ${admin_role}.` });
   } catch (err: any) {
     const code = err.message === 'Admin record not found' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Opportunities ────────────────────────────────────────────────────────────
+
+// GET /api/admin/opportunities
+export const listOpportunities = async (req: Request, res: Response) => {
+  try {
+    const data = await opportunityService.getOpportunities();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/admin/opportunities
+export const createOpportunity = async (req: Request, res: Response) => {
+  try {
+    const postedBy = (req as AuthRequest).user.id;
+    const { type, title } = req.body;
+    if (!type || !title) {
+      res.status(400).json({ success: false, message: 'type and title are required.', errors: [] });
+      return;
+    }
+    if (!['gig', 'job'].includes(type)) {
+      res.status(400).json({ success: false, message: 'type must be gig or job.', errors: [] });
+      return;
+    }
+    const data = await opportunityService.createOpportunity(postedBy, req.body);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// PATCH /api/admin/opportunities/:id
+export const updateOpportunity = async (req: Request, res: Response) => {
+  try {
+    const id   = Number(req.params.id);
+    const data = await opportunityService.updateOpportunity(id, req.body);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message === 'Opportunity not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// GET /api/admin/opportunities/applications
+export const listOpportunityApplications = async (req: Request, res: Response) => {
+  try {
+    const data = await opportunityService.getAllApplications();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// PATCH /api/admin/opportunities/applications/:id
+export const reviewOpportunityApplication = async (req: Request, res: Response) => {
+  try {
+    const appId     = Number(req.params.id);
+    const reviewerId = (req as AuthRequest).user.id;
+    const { status } = req.body;
+    if (!['pending','shortlisted','accepted','rejected'].includes(status)) {
+      res.status(400).json({ success: false, message: 'Invalid status.', errors: [] });
+      return;
+    }
+    const data = await opportunityService.reviewApplication(appId, reviewerId, status);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message === 'Application not found.' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// ─── Roadmap admin ────────────────────────────────────────────────────────────
+
+// GET /api/admin/roadmap/pending-level-ups
+export const listPendingLevelUps = async (req: Request, res: Response) => {
+  try {
+    const data = await roadmapService.getPendingLevelUps();
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// PATCH /api/admin/roadmap/level-up  { intern_profile_id, track_id }
+export const approveInternLevelUp = async (req: Request, res: Response) => {
+  try {
+    const mentorUserId    = (req as AuthRequest).user.id;
+    const { intern_profile_id, track_id } = req.body;
+
+    if (!intern_profile_id || !track_id) {
+      res.status(400).json({ success: false, message: 'intern_profile_id and track_id are required', errors: [] });
+      return;
+    }
+    const data = await roadmapService.approveLevelUp(
+      Number(intern_profile_id),
+      Number(track_id),
+      mentorUserId,
+    );
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not enrolled') ? 404
+               : err.message.includes('No level-up request') ? 400
+               : err.message.includes('highest level') ? 400
+               : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// PATCH /api/admin/roadmap/modules/:moduleId/sign-off  { intern_profile_id }
+export const signOffModule = async (req: Request, res: Response) => {
+  try {
+    const mentorUserId      = (req as AuthRequest).user.id;
+    const moduleId          = Number(req.params.moduleId);
+    const { intern_profile_id } = req.body;
+
+    if (!intern_profile_id) {
+      res.status(400).json({ success: false, message: 'intern_profile_id is required', errors: [] });
+      return;
+    }
+    const data = await roadmapService.mentorSignOffModule(
+      Number(intern_profile_id),
+      moduleId,
+      mentorUserId,
+    );
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404 : 500;
     res.status(code).json({ success: false, message: err.message, errors: [] });
   }
 };

@@ -2,11 +2,15 @@ import { Request, Response } from 'express';
 import path from 'path';
 import { AuthRequest } from '../middlewares/auth';
 import { InternService } from '../services/InternService';
+import { OpportunityService } from '../services/OpportunityService';
+import { RoadmapService } from '../services/RoadmapService';
 import { getSupabase } from '../utils/supabaseClient';
 
 const SUBMISSION_BUCKET = 'submissions';
 
-const internService = new InternService();
+const internService      = new InternService();
+const opportunityService = new OpportunityService();
+const roadmapService     = new RoadmapService();
 
 // GET /api/intern/dashboard
 export const getDashboard = async (req: Request, res: Response) => {
@@ -295,10 +299,55 @@ export const getReceivedFeedback = async (req: Request, res: Response) => {
 export const getRoadmap = async (req: Request, res: Response) => {
   try {
     const userId = (req as AuthRequest).user.id;
-    const data = await internService.getRoadmap(userId);
+    const data   = await roadmapService.getRoadmap(userId);
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/roadmap/modules/:id/complete
+export const completeModule = async (req: Request, res: Response) => {
+  try {
+    const userId     = (req as AuthRequest).user.id;
+    const moduleId   = Number(req.params.id);
+    const { artifact_url } = req.body;
+
+    if (!moduleId) {
+      res.status(400).json({ success: false, message: 'module id is required', errors: [] });
+      return;
+    }
+    const data = await roadmapService.completeModule(userId, moduleId, artifact_url);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not found') ? 404
+               : err.message.includes('not enrolled') ? 403
+               : err.message.includes('previous module') ? 400
+               : err.message.includes('belongs to the') ? 400
+               : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/roadmap/request-level-up
+export const requestLevelUp = async (req: Request, res: Response) => {
+  try {
+    const userId  = (req as AuthRequest).user.id;
+    const { track_id } = req.body;
+
+    if (!track_id) {
+      res.status(400).json({ success: false, message: 'track_id is required', errors: [] });
+      return;
+    }
+    const data = await roadmapService.requestLevelUp(userId, Number(track_id));
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message.includes('not enrolled') ? 403
+               : err.message.includes('highest level') ? 400
+               : err.message.includes('already pending') ? 409
+               : err.message.includes('remaining') ? 400
+               : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
   }
 };
 
@@ -420,5 +469,51 @@ export const uploadSubmissionFile = async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message || 'Upload failed.' });
+  }
+};
+
+// ─── Opportunities (gigs / jobs) ─────────────────────────────────────────────
+
+// GET /api/intern/opportunities?type=gig|job
+export const getOpportunities = async (req: Request, res: Response) => {
+  try {
+    const type = req.query.type as 'gig' | 'job' | undefined;
+    const data = await opportunityService.getOpportunities(type);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/opportunities/:id/apply
+export const applyToOpportunity = async (req: Request, res: Response) => {
+  try {
+    const userId        = (req as AuthRequest).user.id;
+    const opportunityId = Number(req.params.id);
+    const { cover_letter } = req.body;
+
+    if (!opportunityId) {
+      res.status(400).json({ success: false, message: 'opportunity id is required.', errors: [] });
+      return;
+    }
+
+    const data = await opportunityService.apply(userId, opportunityId, cover_letter);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message?.includes('already applied') ? 409
+               : err.message?.includes('not found')      ? 404
+               : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// GET /api/intern/opportunities/applications
+export const getMyOpportunityApplications = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data   = await opportunityService.getMyApplications(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
   }
 };

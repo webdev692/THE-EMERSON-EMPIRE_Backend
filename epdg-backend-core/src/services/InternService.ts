@@ -71,6 +71,170 @@ export class InternService {
     return this.getOnboardingSteps(userId);
   }
 
+  // ─── Onboarding flow (new) ─────────────────────────────────────────────────
+
+  // Mentor first-name pools keyed by track category
+  private static readonly FRONTEND_POOL = ['Wiltord', 'Jonathan', 'Hosea', 'Khoe'];
+  private static readonly BACKEND_POOL  = ['Malik', 'Matheus', 'Joshua'];
+  private static readonly FRONTEND_TRACKS = ['web design', 'social media'];
+
+  async getOnboardingStatus(userId: number) {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT ip.onboarding_status, ip.nda_signed, ip.disclaimer_accepted,
+              ip.track, ip.track_confirmed_at, ip.mentor_name, ip.discovery_problem,
+              ip.is_approved
+       FROM intern_profiles ip
+       WHERE ip.user_id = $1`,
+      [userId],
+    );
+    if (!rows.length) throw new Error('Profile not found');
+
+    const row = rows[0];
+
+    // Self-heal: intern was approved (possibly via old code path) but status
+    // was never advanced from the default — fix it now so the wizard can proceed.
+    if (row.is_approved && row.onboarding_status === 'pending_approval') {
+      await pool.query(
+        `UPDATE intern_profiles SET onboarding_status='pending_onboarding' WHERE user_id=$1`,
+        [userId],
+      );
+      row.onboarding_status = 'pending_onboarding';
+    }
+
+    return row;
+  }
+
+  async signAgreement(userId: number, data: {
+    type:          'nda' | 'disclaimer';
+    agreementText: string;
+    ipAddress?:    string;
+    userAgent?:    string;
+  }) {
+    const pool   = getPool();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      await client.query(
+        `INSERT INTO onboarding_agreements
+           (intern_id, agreement_type, ip_address, user_agent, agreement_text)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (intern_id, agreement_type)
+         DO UPDATE SET agreed_at=NOW(), ip_address=$3, user_agent=$4, agreement_text=$5`,
+        [userId, data.type, data.ipAddress ?? null, data.userAgent ?? null, data.agreementText],
+      );
+
+      const col = data.type === 'nda' ? 'nda_signed' : 'disclaimer_accepted';
+      await client.query(
+        `UPDATE intern_profiles SET ${col}=true WHERE user_id=$1`,
+        [userId],
+      );
+
+      // Advance to track_pending once both agreements are signed
+      const { rows } = await client.query(
+        `SELECT nda_signed, disclaimer_accepted FROM intern_profiles WHERE user_id=$1`,
+        [userId],
+      );
+      if (rows[0]?.nda_signed && rows[0]?.disclaimer_accepted) {
+        await client.query(
+          `UPDATE intern_profiles
+           SET onboarding_status='track_pending'
+           WHERE user_id=$1 AND onboarding_status='pending_onboarding'`,
+          [userId],
+        );
+      }
+
+      await client.query('COMMIT');
+      return this.getOnboardingStatus(userId);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async confirmTrack(userId: number, track: string) {
+    const pool   = getPool();
+    const client = await pool.connect();
+
+    const poolNames = InternService.FRONTEND_TRACKS.includes(track.toLowerCase())
+      ? InternService.FRONTEND_POOL
+      : InternService.BACKEND_POOL;
+
+    try {
+      await client.query('BEGIN');
+
+      // Find least-loaded mentor from the track pool
+      const { rows: poolRows } = await client.query(
+        `SELECT u.id, u.name, a.max_capacity,
+                COUNT(ip2.mentor_id)::int AS assigned_count
+         FROM users u
+         JOIN admins a ON a.user_id = u.id
+         LEFT JOIN intern_profiles ip2 ON ip2.mentor_id = u.id
+         WHERE a.admin_type = 'mentor'
+           AND split_part(u.name, ' ', 1) = ANY($1::text[])
+           AND u.deleted_at IS NULL
+         GROUP BY u.id, u.name, a.max_capacity
+         HAVING COUNT(ip2.mentor_id) < a.max_capacity
+         ORDER BY (a.max_capacity - COUNT(ip2.mentor_id)) DESC
+         LIMIT 1`,
+        [poolNames],
+      );
+
+      let mentorRow = poolRows[0];
+
+      // Fall back to any available mentor if pool is full
+      if (!mentorRow) {
+        const { rows: fallback } = await client.query(
+          `SELECT u.id, u.name, a.max_capacity,
+                  COUNT(ip2.mentor_id)::int AS assigned_count
+           FROM users u
+           JOIN admins a ON a.user_id = u.id
+           LEFT JOIN intern_profiles ip2 ON ip2.mentor_id = u.id
+           WHERE a.admin_type = 'mentor' AND u.deleted_at IS NULL
+           GROUP BY u.id, u.name, a.max_capacity
+           HAVING COUNT(ip2.mentor_id) < a.max_capacity
+           ORDER BY (a.max_capacity - COUNT(ip2.mentor_id)) DESC
+           LIMIT 1`,
+          [],
+        );
+        mentorRow = fallback[0];
+      }
+
+      const mentorId   = mentorRow?.id   ?? null;
+      const mentorName = mentorRow?.name ?? null;
+
+      await client.query(
+        `UPDATE intern_profiles
+         SET track=$1, track_confirmed_at=NOW(), mentor_id=$2, mentor_name=$3,
+             onboarding_status='active_onboarding'
+         WHERE user_id=$4 AND onboarding_status='track_pending'`,
+        [track, mentorId, mentorName, userId],
+      );
+
+      await client.query('COMMIT');
+      return this.getOnboardingStatus(userId);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async submitDiscovery(userId: number, problem: string) {
+    const pool = getPool();
+    await pool.query(
+      `UPDATE intern_profiles
+       SET discovery_problem=$1, onboarding_status='roadmap_pending', onboarding_complete=true
+       WHERE user_id=$2 AND onboarding_status='active_onboarding'`,
+      [problem, userId],
+    );
+    return this.getOnboardingStatus(userId);
+  }
+
   // ─── Profile ───────────────────────────────────────────────────────────────
 
   async getProfile(userId: number) {

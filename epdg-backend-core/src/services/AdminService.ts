@@ -1015,8 +1015,8 @@ export class AdminService {
         [user.id]
       );
     } else if (user.role === 'intern') {
-      const fields = ['is_approved=$1', 'approved_by=$2', 'approved_at=$3', 'rejection_reason=$4'];
-      const values: unknown[] = [true, adminId, now, null];
+      const fields = ['is_approved=$1', 'approved_by=$2', 'approved_at=$3', 'rejection_reason=$4', 'onboarding_status=$5'];
+      const values: unknown[] = [true, adminId, now, null, 'pending_onboarding'];
 
       if (payload.department) { fields.push(`department=$${values.length + 1}`); values.push(payload.department); }
       if (payload.mentor)     { fields.push(`mentor_name=$${values.length + 1}`); values.push(payload.mentor); }
@@ -1065,7 +1065,8 @@ export class AdminService {
   // ─── Email helpers ───────────────────────────────────────────────────────────
 
   private sendApprovalEmail(to: string, name: string, role: string, department?: string, mentor?: string) {
-    const loginUrl = `${FRONTEND()}/login`;
+    const onboardingUrl = `${FRONTEND()}/dashboard/onboarding`;
+    const isIntern = role === 'intern';
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
         Congratulations <strong>${name}</strong>! Your application as a <strong>${role}</strong>
@@ -1073,14 +1074,22 @@ export class AdminService {
       </p>
       ${department ? `<p style="font-size:14px;color:#555;">📌 Department: <strong>${department}</strong></p>` : ''}
       ${mentor     ? `<p style="font-size:14px;color:#555;">👤 Assigned Mentor: <strong>${mentor}</strong></p>` : ''}
-      <p style="font-size:14px;color:#555;">You can now log in and start your journey.</p>
+      ${isIntern
+        ? `<p style="font-size:14px;color:#555;line-height:1.6;">
+             You can now log in and complete your onboarding. The process takes just a few minutes —
+             sign the required agreements, choose your track, and submit your discovery statement to
+             get started.
+           </p>`
+        : `<p style="font-size:14px;color:#555;">You can now log in and access your dashboard.</p>`
+      }
       <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
         <tr><td style="background:#4B1E91;border-radius:8px;">
-          <a href="${loginUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
-            Log In Now
+          <a href="${onboardingUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            ${isIntern ? 'Start Onboarding →' : 'Go to Dashboard →'}
           </a>
         </td></tr>
       </table>
+      <p style="font-size:12px;color:#999;">If you are not logged in you will be asked to sign in first.</p>
     `;
     this.sendMail(to, '🎉 Application Approved — Emerson Professional', body).catch((e) =>
       logger.error('approval email failed', e)

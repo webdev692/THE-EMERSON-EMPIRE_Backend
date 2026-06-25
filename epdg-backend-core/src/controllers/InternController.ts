@@ -72,6 +72,82 @@ export const completeOnboardingStep = async (req: Request, res: Response) => {
   }
 };
 
+// ── Onboarding flow (new) ─────────────────────────────────────────────────
+
+// GET /api/intern/onboarding/status
+export const getOnboardingStatus = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const data   = await internService.getOnboardingStatus(userId);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    const code = err.message === 'Profile not found' ? 404 : 500;
+    res.status(code).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/onboarding/sign-agreement
+export const signAgreement = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { type, agreement_text } = req.body;
+    if (!type || !agreement_text) {
+      res.status(400).json({ success: false, message: 'type and agreement_text are required', errors: [] });
+      return;
+    }
+    if (!['nda', 'disclaimer'].includes(type)) {
+      res.status(400).json({ success: false, message: 'type must be nda or disclaimer', errors: [] });
+      return;
+    }
+    const data = await internService.signAgreement(userId, {
+      type,
+      agreementText: agreement_text,
+      ipAddress:     req.ip,
+      userAgent:     req.headers['user-agent'],
+    });
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/onboarding/confirm-track
+export const confirmTrack = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { track } = req.body;
+    if (!track) {
+      res.status(400).json({ success: false, message: 'track is required', errors: [] });
+      return;
+    }
+    const VALID_TRACKS = ['Web Design', 'Sales', 'Social Media', 'Digital Marketing'];
+    if (!VALID_TRACKS.includes(track)) {
+      res.status(400).json({ success: false, message: 'Invalid track. Choose: Web Design, Sales, Social Media, or Digital Marketing', errors: [] });
+      return;
+    }
+    const data = await internService.confirmTrack(userId, track);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
+// POST /api/intern/onboarding/submit-discovery
+export const submitDiscovery = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const { problem } = req.body;
+    if (!problem || String(problem).trim().length < 20) {
+      res.status(400).json({ success: false, message: 'A problem description of at least 20 characters is required', errors: [] });
+      return;
+    }
+    const data = await internService.submitDiscovery(userId, String(problem).trim());
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message, errors: [] });
+  }
+};
+
 // ── Tasks ──────────────────────────────────────────────────────────────────
 
 export const getTasks = async (req: Request, res: Response) => {

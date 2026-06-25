@@ -17,7 +17,13 @@ router.get('/dashboard', roleGuard('intern'), InternController.getDashboard);
 router.get('/profile',   roleGuard('intern'), InternController.getProfile);
 router.patch('/profile', roleGuard('intern'), InternController.updateProfile);
 
-// Onboarding
+// Onboarding — new flow (must come before :stepId route)
+router.get('/onboarding/status',              roleGuard('intern'), InternController.getOnboardingStatus);
+router.post('/onboarding/sign-agreement',     roleGuard('intern'), InternController.signAgreement);
+router.post('/onboarding/confirm-track',      roleGuard('intern'), InternController.confirmTrack);
+router.post('/onboarding/submit-discovery',   roleGuard('intern'), InternController.submitDiscovery);
+
+// Onboarding — legacy step flow (kept for backwards compatibility)
 router.get('/onboarding',                    roleGuard('intern'), InternController.getOnboarding);
 router.patch('/onboarding/:stepId/complete', roleGuard('intern'), InternController.completeOnboardingStep);
 

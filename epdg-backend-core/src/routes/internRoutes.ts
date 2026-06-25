@@ -3,6 +3,7 @@ import multer from 'multer';
 import { authMiddleware, roleGuard } from '../middlewares/auth';
 import * as InternController from '../controllers/InternController';
 import * as ApplicationController from '../controllers/ApplicationController';
+import * as CareerFileController from '../controllers/CareerFileController';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -75,5 +76,16 @@ router.patch('/mentor/sessions/:id/rate',    roleGuard('intern'), InternControll
 // Progress
 router.get('/progress/stats',  roleGuard('intern'), InternController.getProgressStats);
 router.get('/progress/skills', roleGuard('intern'), InternController.getSkills);
+
+// Career File
+router.get('/career-file',                      roleGuard('intern'), CareerFileController.getCareerFile);
+router.put('/career-file',                      roleGuard('intern'), CareerFileController.updateCareerFile);
+router.post('/career-file/auto-populate',       roleGuard('intern'), CareerFileController.autoPopulate);
+router.post('/career-file/skills',              roleGuard('intern'), CareerFileController.addSkill);
+router.delete('/career-file/skills/:id',        roleGuard('intern'), CareerFileController.removeSkill);
+router.post('/career-file/experiences',         roleGuard('intern'), CareerFileController.addExperience);
+router.delete('/career-file/experiences/:id',   roleGuard('intern'), CareerFileController.removeExperience);
+router.post('/career-file/projects',            roleGuard('intern'), CareerFileController.addProject);
+router.delete('/career-file/projects/:id',      roleGuard('intern'), CareerFileController.removeProject);
 
 export default router;

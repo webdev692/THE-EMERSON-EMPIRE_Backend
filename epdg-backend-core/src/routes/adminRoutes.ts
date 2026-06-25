@@ -3,6 +3,7 @@ import { authMiddleware, roleGuard, superAdminGuard } from '../middlewares/auth'
 import * as AdminController from '../controllers/AdminController';
 import * as ApplicationController from '../controllers/ApplicationController';
 import * as CertificateController from '../controllers/CertificateController';
+import * as CareerFileController from '../controllers/CareerFileController';
 
 const router = Router();
 
@@ -184,5 +185,9 @@ router.patch('/opportunities/applications/:id',      AdminController.reviewOppor
 router.get('/roadmap/pending-level-ups',             AdminController.listPendingLevelUps);
 router.patch('/roadmap/level-up',                    AdminController.approveInternLevelUp);
 router.patch('/roadmap/modules/:moduleId/sign-off',  AdminController.signOffModule);
+
+// Career File admin — cohort analytics + intern search
+router.get('/career-analytics', CareerFileController.getCohortAnalytics);
+router.get('/intern-search',    CareerFileController.searchInterns);
 
 export default router;

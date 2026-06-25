@@ -752,16 +752,20 @@ export class InternService {
   async getMentor(userId: number) {
     const pool = getPool();
     const { rows } = await pool.query(
-      `SELECT u.id AS mentor_id, u.name AS mentor_name, u.email AS mentor_email,
-              ip_mentor.department AS mentor_department,
-              ip_mentor.bio        AS mentor_bio,
-              ip_mentor.skills     AS mentor_skills,
-              p.id                 AS placement_id
+      `SELECT u.id   AS mentor_id,
+              u.name  AS mentor_name,
+              u.email AS mentor_email,
+              a.department AS mentor_department,
+              NULL::text   AS mentor_bio,
+              NULL::text[] AS mentor_skills,
+              p.id         AS placement_id
        FROM intern_profiles ip
-       JOIN placements p       ON p.intern_id = ip.id AND p.status = 'active'
-       JOIN users u            ON u.id = p.mentor_id
-       LEFT JOIN intern_profiles ip_mentor ON ip_mentor.user_id = u.id
-       WHERE ip.user_id = $1 AND u.deleted_at IS NULL
+       JOIN users u  ON u.name = ip.mentor_name AND u.deleted_at IS NULL
+       JOIN admins a ON a.user_id = u.id
+       LEFT JOIN placements p ON p.intern_id = ip.id AND p.status = 'active'
+       WHERE ip.user_id = $1
+         AND ip.mentor_name IS NOT NULL
+         AND ip.deleted_at IS NULL
        LIMIT 1`,
       [userId],
     );

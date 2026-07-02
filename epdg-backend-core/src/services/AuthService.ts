@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
 import { Resend } from 'resend';
+import { createDualWriteUser } from '../utils/coreIdentity';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'default-dev-secret-change-in-production';
 const SALT_ROUNDS = 12;
@@ -41,7 +42,7 @@ export class AuthService {
       await client.query('BEGIN');
 
       const existing = await client.query(
-        'SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL',
+        'SELECT id FROM core.users WHERE email = $1 AND deleted_at IS NULL',
         [data.email]
       );
       if (existing.rows.length > 0) {
@@ -52,14 +53,26 @@ export class AuthService {
       const verificationToken = randomUUID();
       const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-      const userResult = await client.query(
-        `INSERT INTO users (email, name, password, role, verification_token, token_expires_at, created_at)
-         VALUES ($1, $2, $3, $4::user_role, $5, $6, NOW())
-         RETURNING id, email, name, role, is_verified, last_login_at, created_at`,
-        [data.email, data.name, hashedPassword, data.role, verificationToken, tokenExpiresAt]
-      );
+      const { id: userId, createdAt } = await createDualWriteUser(client, {
+        email: data.email,
+        name: data.name,
+        hashedPassword,
+        role: data.role,
+        adminRole: data.role === 'admin' ? 'admin' : undefined,
+        isVerified: false,
+        verificationToken,
+        tokenExpiresAt,
+      });
 
-      const user = userResult.rows[0];
+      const user = {
+        id: userId,
+        email: data.email,
+        name: data.name,
+        role: data.role,
+        is_verified: false,
+        last_login_at: null,
+        created_at: createdAt,
+      };
 
       if (data.role === 'company') {
         await client.query(
@@ -123,7 +136,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
       [email]
     );
 
@@ -132,10 +145,6 @@ export class AuthService {
     }
 
     const user = result.rows[0];
-
-    if (user.role !== role) {
-      throw new Error('Invalid email or password');
-    }
 
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
@@ -146,33 +155,50 @@ export class AuthService {
       throw new Error('Please verify your email before logging in');
     }
 
-    await pool.query(
-      'UPDATE users SET last_login_at = NOW() WHERE id = $1',
+    const branchRoleResult = await pool.query(
+      `SELECT ubr.role_name, ubr.admin_role, ubr.rejection_reason
+       FROM core.user_branch_roles ubr
+       JOIN core.branches b ON b.id = ubr.branch_id
+       WHERE ubr.user_id = $1 AND b.code = 'epdg'`,
       [user.id]
     );
+
+    if (branchRoleResult.rows.length === 0) {
+      throw new Error('Invalid email or password');
+    }
+
+    const branchRole = branchRoleResult.rows[0];
+
+    if (branchRole.role_name !== role) {
+      throw new Error('Invalid email or password');
+    }
+
+    await pool.query('UPDATE core.users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
+    await pool.query('UPDATE epdg.users SET last_login_at = NOW() WHERE id = $1', [user.id]);
 
     let status = 'approved';
     let is_mentor = false;
     let force_password_change = false;
-    let admin_role: string | undefined;
+    const admin_role: string | undefined = branchRole.admin_role ?? undefined;
 
-    if (user.role === 'company') {
+    if (branchRole.role_name === 'company') {
       const r = await pool.query(
         'SELECT is_approved FROM companies WHERE user_id = $1 AND deleted_at IS NULL',
         [user.id]
       );
       if (r.rows.length > 0 && !r.rows[0].is_approved) {
-        status = user.rejection_reason ? 'rejected' : 'pending';
+        status = branchRole.rejection_reason ? 'rejected' : 'pending';
       }
-    } else if (user.role === 'school') {
+    } else if (branchRole.role_name === 'school') {
       const r = await pool.query(
         'SELECT is_approved FROM schools WHERE user_id = $1 AND deleted_at IS NULL',
         [user.id]
       );
       if (r.rows.length > 0 && !r.rows[0].is_approved) {
-        status = user.rejection_reason ? 'rejected' : 'pending';
+        status = branchRole.rejection_reason ? 'rejected' : 'pending';
       }
-    } else if (user.role === 'intern') {
+    } else if (branchRole.role_name === 'intern') {
       const r = await pool.query(
         'SELECT is_approved, rejection_reason FROM intern_profiles WHERE user_id = $1',
         [user.id]
@@ -180,19 +206,18 @@ export class AuthService {
       if (r.rows.length > 0 && !r.rows[0].is_approved) {
         status = r.rows[0].rejection_reason ? 'rejected' : 'pending';
       }
-    } else if (user.role === 'admin') {
+    } else if (branchRole.role_name === 'admin') {
       const r = await pool.query(
-        'SELECT is_mentor, force_password_change, admin_role FROM admins WHERE user_id = $1',
+        'SELECT is_mentor, force_password_change FROM admins WHERE user_id = $1',
         [user.id]
       );
       if (r.rows.length > 0) {
         is_mentor             = r.rows[0].is_mentor             ?? false;
         force_password_change = r.rows[0].force_password_change ?? false;
-        admin_role            = r.rows[0].admin_role            ?? 'admin';
       }
     }
 
-    const token = this.generateToken(user, admin_role);
+    const token = this.generateToken(user, branchRole.role_name, admin_role);
 
     return {
       token,
@@ -200,7 +225,7 @@ export class AuthService {
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role,
+        role: branchRole.role_name,
         status,
         is_mentor,
         force_password_change,
@@ -213,7 +238,7 @@ export class AuthService {
     const pool = getPool();
 
     const { rows } = await pool.query(
-      'SELECT password FROM users WHERE id = $1 AND deleted_at IS NULL',
+      'SELECT password FROM core.users WHERE id = $1 AND deleted_at IS NULL',
       [userId]
     );
     if (!rows.length) throw new Error('User not found');
@@ -222,7 +247,9 @@ export class AuthService {
     if (!valid) throw new Error('Current password is incorrect');
 
     const hashed = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, userId]);
+    await pool.query('UPDATE core.users SET password = $1 WHERE id = $2', [hashed, userId]);
+    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
+    await pool.query('UPDATE epdg.users SET password = $1 WHERE id = $2', [hashed, userId]);
     await pool.query(
       'UPDATE admins SET force_password_change = FALSE WHERE user_id = $1',
       [userId]
@@ -234,7 +261,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE id = $1 AND deleted_at IS NULL',
       [decoded.id]
     );
 
@@ -243,13 +270,20 @@ export class AuthService {
     }
 
     const user = result.rows[0];
-    let admin_role: string | undefined;
-    if (user.role === 'admin') {
-      const r = await pool.query('SELECT admin_role FROM admins WHERE user_id = $1', [user.id]);
-      if (r.rows.length > 0) admin_role = r.rows[0].admin_role ?? 'admin';
-    }
 
-    const newToken = this.generateToken(user, admin_role);
+    const branchRoleResult = await pool.query(
+      `SELECT ubr.role_name, ubr.admin_role
+       FROM core.user_branch_roles ubr
+       JOIN core.branches b ON b.id = ubr.branch_id
+       WHERE ubr.user_id = $1 AND b.code = 'epdg'`,
+      [user.id]
+    );
+    if (branchRoleResult.rows.length === 0) {
+      throw new Error('User role not found');
+    }
+    const branchRole = branchRoleResult.rows[0];
+
+    const newToken = this.generateToken(user, branchRole.role_name, branchRole.admin_role ?? undefined);
 
     return { token: newToken };
   }
@@ -258,7 +292,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE verification_token = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE verification_token = $1 AND deleted_at IS NULL',
       [token]
     );
 
@@ -273,7 +307,12 @@ export class AuthService {
     }
 
     await pool.query(
-      'UPDATE users SET is_verified = true, verification_token = NULL, token_expires_at = NULL WHERE id = $1',
+      'UPDATE core.users SET is_verified = true, verification_token = NULL, token_expires_at = NULL WHERE id = $1',
+      [user.id]
+    );
+    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
+    await pool.query(
+      'UPDATE epdg.users SET is_verified = true, verification_token = NULL, token_expires_at = NULL WHERE id = $1',
       [user.id]
     );
   }
@@ -282,7 +321,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
       [email]
     );
 
@@ -300,7 +339,12 @@ export class AuthService {
     const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     await pool.query(
-      'UPDATE users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
+      'UPDATE core.users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
+      [verificationToken, tokenExpiresAt, user.id]
+    );
+    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
+    await pool.query(
+      'UPDATE epdg.users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
       [verificationToken, tokenExpiresAt, user.id]
     );
 
@@ -315,7 +359,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
       [email]
     );
 
@@ -357,7 +401,7 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL',
+      'SELECT * FROM core.users WHERE id = $1 AND deleted_at IS NULL',
       [decoded.id]
     );
 
@@ -368,7 +412,12 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
     await pool.query(
-      'UPDATE users SET password = $1 WHERE id = $2',
+      'UPDATE core.users SET password = $1 WHERE id = $2',
+      [hashedPassword, decoded.id]
+    );
+    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
+    await pool.query(
+      'UPDATE epdg.users SET password = $1 WHERE id = $2',
       [hashedPassword, decoded.id]
     );
 
@@ -379,7 +428,12 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      `SELECT id, email, name, role, is_verified, last_login_at, created_at FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT cu.id, cu.email, cu.name, cu.is_verified, cu.last_login_at, cu.created_at,
+              ubr.role_name AS role, ubr.admin_role
+       FROM core.users cu
+       JOIN core.user_branch_roles ubr ON ubr.user_id = cu.id
+       JOIN core.branches b ON b.id = ubr.branch_id AND b.code = 'epdg'
+       WHERE cu.id = $1 AND cu.deleted_at IS NULL`,
       [userId]
     );
 
@@ -411,8 +465,8 @@ export class AuthService {
     return;
   }
 
-  private generateToken(user: any, admin_role?: string): string {
-    const payload: Record<string, unknown> = { id: user.id, email: user.email, role: user.role };
+  private generateToken(user: { id: number; email: string }, role: string, admin_role?: string): string {
+    const payload: Record<string, unknown> = { id: user.id, email: user.email, role };
     if (admin_role) payload.admin_role = admin_role;
     return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
   }

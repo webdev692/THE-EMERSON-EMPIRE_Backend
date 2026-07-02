@@ -40,6 +40,13 @@ export function getPool(): Pool {
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
       ssl: getSslConfig(),
+      // epdg must come before public: unqualified table/type names in
+      // services/controllers, and in the CREATE-IF-NOT-EXISTS DDL of
+      // migrations 001-031, must resolve to the epdg schema now that
+      // migration 032 has moved those objects there. Sent as a startup
+      // parameter (not a post-connect SET) so it is applied even when
+      // DB_HOST is a transaction-mode connection pooler.
+      options: "-c search_path=epdg,public",
     };
 
     pool = new Pool(dbConfig);

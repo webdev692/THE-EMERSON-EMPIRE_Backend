@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { Resend } from 'resend';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
+import { createDualWriteUser } from '../utils/coreIdentity';
 
 function generateTempPassword(): string {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
@@ -235,20 +236,29 @@ export class AdminService {
       await client.query('BEGIN');
 
       const existing = await client.query(
-        'SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL', [data.email]
+        'SELECT id FROM core.users WHERE email = $1 AND deleted_at IS NULL', [data.email]
       );
       if (existing.rows.length) throw new Error('Email already in use.');
 
       const plainPassword = generateTempPassword();
 
       const hashed = await bcrypt.hash(plainPassword, 12);
-      const { rows } = await client.query(
-        `INSERT INTO users (name, email, password, role, is_verified, created_at)
-         VALUES ($1, $2, $3, $4::user_role, true, NOW())
-         RETURNING id, name, email, role, is_verified, created_at`,
-        [data.name, data.email, hashed, data.role]
-      );
-      const user = rows[0];
+      const { id: userId, createdAt } = await createDualWriteUser(client, {
+        email: data.email,
+        name: data.name,
+        hashedPassword: hashed,
+        role: data.role,
+        adminRole: data.role === 'admin' ? 'admin' : undefined,
+        isVerified: true,
+      });
+      const user = {
+        id: userId,
+        name: data.name,
+        email: data.email,
+        role: data.role,
+        is_verified: true,
+        created_at: createdAt,
+      };
 
       if (data.role === 'admin') {
         const adminType  = data.admin_type  || 'general';
@@ -382,18 +392,22 @@ export class AdminService {
       await client.query('BEGIN');
 
       const existing = await client.query(
-        `SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL`,
+        `SELECT id FROM core.users WHERE email = $1 AND deleted_at IS NULL`,
         [data.email]
       );
       if (existing.rows.length) throw new Error('Email already in use.');
 
       const hashed = await bcrypt.hash(data.password, 10);
 
-      const { rows: [user] } = await client.query(
-        `INSERT INTO users (name, email, password, role, is_verified, created_at)
-         VALUES ($1, $2, $3, 'admin', TRUE, NOW()) RETURNING id`,
-        [data.name, data.email, hashed]
-      );
+      const { id: userId } = await createDualWriteUser(client, {
+        email: data.email,
+        name: data.name,
+        hashedPassword: hashed,
+        role: 'admin',
+        adminRole: 'admin',
+        isVerified: true,
+      });
+      const user = { id: userId };
 
       await client.query(
         `INSERT INTO admins (user_id, admin_role, is_mentor, department, max_capacity, force_password_change, created_at)
@@ -978,11 +992,34 @@ export class AdminService {
 
   async promoteUser(targetUserId: number, newAdminRole: 'admin' | 'super_admin') {
     const pool = getPool();
-    const { rows } = await pool.query(
-      `UPDATE admins SET admin_role=$1 WHERE user_id=$2 RETURNING user_id`,
-      [newAdminRole, targetUserId]
-    );
-    if (!rows.length) throw new Error('Admin record not found');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        `UPDATE admins SET admin_role=$1 WHERE user_id=$2 RETURNING user_id`,
+        [newAdminRole, targetUserId]
+      );
+      if (!rows.length) throw new Error('Admin record not found');
+
+      // Keep core.user_branch_roles.admin_role in sync — it's what gets
+      // baked into freshly-issued JWTs (see AuthService.generateToken).
+      const { rowCount } = await client.query(
+        `UPDATE core.user_branch_roles ubr
+         SET admin_role = $1::core.admin_role
+         FROM core.branches b
+         WHERE ubr.branch_id = b.id AND b.code = 'epdg' AND ubr.user_id = $2`,
+        [newAdminRole, targetUserId]
+      );
+      if (!rowCount) throw new Error('core.user_branch_roles record not found for user');
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   private async approve(client: any, user: any, adminId: number, payload: any) {

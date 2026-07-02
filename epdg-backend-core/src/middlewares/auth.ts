@@ -4,6 +4,10 @@ import jwt from 'jsonwebtoken';
 const JWT_SECRET = process.env.JWT_SECRET || 'default-dev-secret-change-in-production';
 
 export interface AuthRequest extends Request {
+  // id/email/role/admin_role are JWT claims issued by AuthService at
+  // login/register/refresh time, sourced from core.user_branch_roles
+  // (not epdg.users.role). This middleware never queries the database —
+  // it only trusts what's already baked into the token.
   user: {
     id: number;
     email: string;

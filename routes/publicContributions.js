@@ -16,13 +16,14 @@ router.get('/', async (_req, res, next) => {
          cf.headline,
          cf.summary,
          cf.readiness_tier,
-         ip.name as intern_name,
+         u.name as intern_name,
          ip.track,
          ip.portfolio_url,
          ip.linkedin_url,
          ip.github_url
        from epdg.career_files cf
        join epdg.intern_profiles ip on ip.id = cf.intern_profile_id
+       join epdg.users u on u.id = ip.user_id
        where cf.is_public = true
        order by cf.updated_at desc nulls last, cf.created_at desc
        limit 50`

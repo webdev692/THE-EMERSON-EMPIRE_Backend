@@ -3,12 +3,16 @@ const { Pool } = require('pg');
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-  console.warn('DATABASE_URL is not set. Database-backed routes will fail until it is configured.');
+  console.warn('Database configuration is unavailable.');
 }
 
 const pool = new Pool({
   connectionString,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl: process.env.NODE_ENV === 'production' || process.env.DB_SSL === 'true'
+    ? { rejectUnauthorized: true }
+    : false,
+  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 5000),
+  statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 15000),
 });
 
 async function query(text, params = []) {
@@ -24,21 +28,21 @@ async function query(text, params = []) {
 
     return result;
   } catch (error) {
-    console.error('Database query error:', error.message);
+    console.error('Database query failed', { errorType: error.name || 'Error' });
     throw error;
   }
 }
 
 async function checkDatabase() {
   if (!connectionString) {
-    return { configured: false, ok: false, message: 'DATABASE_URL is not configured.' };
+    return { configured: false, ok: false };
   }
 
   try {
     const result = await query('select now() as checked_at');
-    return { configured: true, ok: true, checkedAt: result.rows[0].checked_at };
+    return { configured: true, ok: true };
   } catch (error) {
-    return { configured: true, ok: false, message: error.message };
+    return { configured: true, ok: false };
   }
 }
 

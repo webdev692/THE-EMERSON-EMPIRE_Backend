@@ -25,6 +25,8 @@ router.get('/', async (_req, res, next) => {
        join epdg.intern_profiles ip on ip.id = cf.intern_profile_id
        join epdg.users u on u.id = ip.user_id
        where cf.is_public = true
+         and ip.is_approved = true
+         and u.deleted_at is null
        order by cf.updated_at desc nulls last, cf.created_at desc
        limit 50`
     );

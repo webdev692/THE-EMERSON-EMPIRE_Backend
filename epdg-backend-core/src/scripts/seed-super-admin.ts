@@ -10,14 +10,16 @@ import bcrypt from 'bcrypt';
 import { getPool, testConnection } from '../db';
 
 const password = process.env.SUPER_ADMIN_PASSWORD;
-if (!password) {
-  console.error('❌ SUPER_ADMIN_PASSWORD env var is not set. Aborting.');
+const name = process.env.SUPER_ADMIN_NAME;
+const email = process.env.SUPER_ADMIN_EMAIL;
+if (!password || !name || !email) {
+  console.error('Required super-administrator seed configuration is unavailable.');
   process.exit(1);
 }
 
 const SUPER_ADMIN = {
-  name:     process.env.SUPER_ADMIN_NAME  || 'Emerson Admin',
-  email:    process.env.SUPER_ADMIN_EMAIL || 'admin@theemersonempire.info',
+  name,
+  email,
   password,
   role:     'admin' as const,
 };
@@ -54,7 +56,7 @@ async function seed() {
       [SUPER_ADMIN.email, SUPER_ADMIN.name, hashed]
     );
     const coreUser = coreUserRows[0];
-    console.log(`✅ core.users upserted: id=${coreUser.id}, email=${coreUser.email}`);
+    console.log('Core administrator identity upserted.');
 
     const { rows: branchRows } = await client.query(`SELECT id FROM core.branches WHERE code = 'epdg'`);
     if (!branchRows.length) {
@@ -71,7 +73,7 @@ async function seed() {
              admin_role = 'super_admin'::core.admin_role`,
       [coreUser.id, branchId, SUPER_ADMIN.role]
     );
-    console.log(`✅ core.user_branch_roles upserted: user_id=${coreUser.id}, branch_id=${branchId}, role=super_admin`);
+    console.log('Core branch authorization upserted.');
 
     // TEMPORARY: mirror into epdg.users, same id as core.users, purely so
     // existing epdg.* FK constraints (admins, ...) keep resolving. Not a
@@ -88,10 +90,10 @@ async function seed() {
       [coreUser.id, SUPER_ADMIN.name, SUPER_ADMIN.email, hashed, SUPER_ADMIN.role]
     );
     const user = epdgUserRows[0];
-    console.log(`✅ epdg.users mirror upserted: id=${user.id}, email=${user.email}, role=${user.role}`);
+    console.log('EPDG compatibility identity upserted.');
 
     // Upsert epdg.admins row (super_admin rank) — untouched shape, still epdg-specific.
-    const { rows: adminRows } = await client.query(
+    await client.query(
       `INSERT INTO admins (user_id, admin_role, permissions, created_at, updated_at)
        VALUES ($1, 'super_admin'::admin_role, $2, NOW(), NOW())
        ON CONFLICT (user_id) DO UPDATE
@@ -101,8 +103,7 @@ async function seed() {
        RETURNING id, user_id, admin_role`,
       [user.id, JSON.stringify({ all: true })]
     );
-    const admin = adminRows[0];
-    console.log(`✅ epdg.admins row upserted: id=${admin.id}, user_id=${admin.user_id}, role=${admin.admin_role}\n`);
+    console.log('EPDG administrator profile upserted.');
 
     await client.query('COMMIT');
   } catch (err) {
@@ -113,11 +114,9 @@ async function seed() {
   }
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('📋 Super Admin Credentials');
+  console.log('Super-administrator seed completed.');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`   Email:    ${SUPER_ADMIN.email}`);
-  console.log(`   Password: (set via SUPER_ADMIN_PASSWORD env var)`);
-  console.log(`   Role:     super_admin`);
+  console.log('Credential values were not written to logs.');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('⚠️  Store these credentials securely.\n');
 
@@ -126,6 +125,6 @@ async function seed() {
 }
 
 seed().catch((err) => {
-  console.error('❌ Seed failed:', err.message);
+  console.error('Super-administrator seed failed.', { errorType: err?.name || 'Error' });
   process.exit(1);
 });

@@ -1,12 +1,12 @@
 import { Router } from 'express';
-import { authMiddleware, roleGuard } from '../middlewares/auth';
+import { authMiddleware, mentorGuard } from '../middlewares/auth';
 import * as MentorController from '../controllers/MentorController';
 import * as CareerFileController from '../controllers/CareerFileController';
 
 const router = Router();
 
 router.use(authMiddleware);
-router.use(roleGuard('admin'));
+router.use(mentorGuard);
 
 router.get('/stats',                               MentorController.getStats);
 router.get('/interns',                             MentorController.getMyInterns);

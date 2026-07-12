@@ -3,6 +3,7 @@ import { getPool } from '../db';
 import { getSupabase } from '../utils/supabaseClient';
 import { generateCertificatePDF } from '../utils/certificatePdf';
 import { logger } from '../utils/logger';
+import { requireEnvironmentVariable } from '../config/env';
 
 const CERT_BUCKET = 'certificates';
 
@@ -109,7 +110,7 @@ export async function issueCertificate(payload: IssuePayload) {
     issue_date:         issueDateFinal,
     certificate_number: certNumber,
     cert_id:            certId,
-    frontend_url:       process.env.FRONTEND_URL ?? 'https://epd-group.netlify.app',
+    frontend_url:       requireEnvironmentVariable('FRONTEND_URL').replace(/\/$/, ''),
   });
 
   // 7. Upload PDF to Supabase (fire-and-forget on failure)

@@ -1,12 +1,13 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
+import type { PoolClient } from 'pg';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
 import { Resend } from 'resend';
 import { createDualWriteUser } from '../utils/coreIdentity';
+import { requireEnvironmentVariable } from '../config/env';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-dev-secret-change-in-production';
 const SALT_ROUNDS = 12;
 
 function getResend(): Resend {
@@ -16,6 +17,36 @@ function getResend(): Resend {
   return new Resend(process.env.RESEND_API_KEY);
 }
 
+async function withTransaction<T>(
+  work: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      logger.error('Authentication transaction rollback failed');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function requireMirroredUpdates(
+  coreResult: { rowCount: number | null },
+  epdgResult: { rowCount: number | null },
+): void {
+  if (coreResult.rowCount !== 1 || epdgResult.rowCount !== 1) {
+    throw new Error('Identity synchronization failed');
+  }
+}
+
 export class AuthService {
 
   async register(data: {
@@ -23,7 +54,7 @@ export class AuthService {
     email: string;
     password: string;
     contact_phone?: string;
-    role: 'admin' | 'company' | 'intern' | 'school';
+    role: 'company' | 'intern' | 'school';
     country?: string;
     county?: string;
     industry?: string;
@@ -33,7 +64,6 @@ export class AuthService {
     city?: string;
     school_type?: 'university' | 'college' | 'polytechnic' | 'tvet';
     cover_letter?: string;
-    cv_url?: string;
   }): Promise<{ user: any; message: string }> {
     const pool = getPool();
     const client = await pool.connect();
@@ -58,7 +88,6 @@ export class AuthService {
         name: data.name,
         hashedPassword,
         role: data.role,
-        adminRole: data.role === 'admin' ? 'admin' : undefined,
         isVerified: false,
         verificationToken,
         tokenExpiresAt,
@@ -90,15 +119,9 @@ export class AuthService {
         );
       } else if (data.role === 'intern') {
         await client.query(
-          `INSERT INTO intern_profiles (user_id, contact_phone, cv_url, cover_letter, created_at)
-           VALUES ($1, $2, $3, $4, NOW())`,
-          [user.id, data.contact_phone || null, data.cv_url || null, data.cover_letter || null]
-        );
-      } else if (data.role === 'admin') {
-        await client.query(
-          `INSERT INTO admins (user_id, admin_role, is_mentor, created_at)
-           VALUES ($1, 'admin', FALSE, NOW())`,
-          [user.id]
+          `INSERT INTO intern_profiles (user_id, contact_phone, cover_letter, created_at)
+           VALUES ($1, $2, $3, NOW())`,
+          [user.id, data.contact_phone || null, data.cover_letter || null]
         );
       }
 
@@ -110,7 +133,7 @@ export class AuthService {
 
       return {
         user,
-        message: 'Registration successful. Please check your email to verify your account.',
+        message: 'Registration saved. Verification email delivery is processed separately.',
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -136,7 +159,9 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.email = $1 AND cu.deleted_at IS NULL`,
       [email]
     );
 
@@ -173,38 +198,58 @@ export class AuthService {
       throw new Error('Invalid email or password');
     }
 
-    await pool.query('UPDATE core.users SET last_login_at = NOW() WHERE id = $1', [user.id]);
-    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
-    await pool.query('UPDATE epdg.users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    await withTransaction(async (client) => {
+      const coreUpdate = await client.query(
+        'UPDATE core.users SET last_login_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id',
+        [user.id],
+      );
+      const epdgUpdate = await client.query(
+        'UPDATE epdg.users SET last_login_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id',
+        [user.id],
+      );
+      requireMirroredUpdates(coreUpdate, epdgUpdate);
+    });
 
-    let status = 'approved';
+    let status = branchRole.rejection_reason ? 'rejected' : 'pending';
     let is_mentor = false;
     let force_password_change = false;
     const admin_role: string | undefined = branchRole.admin_role ?? undefined;
 
     if (branchRole.role_name === 'company') {
       const r = await pool.query(
-        'SELECT is_approved FROM companies WHERE user_id = $1 AND deleted_at IS NULL',
+        `SELECT c.is_approved, u.rejection_reason
+         FROM epdg.companies c
+         JOIN epdg.users u ON u.id = c.user_id AND u.deleted_at IS NULL
+         WHERE c.user_id = $1 AND c.deleted_at IS NULL`,
         [user.id]
       );
-      if (r.rows.length > 0 && !r.rows[0].is_approved) {
-        status = branchRole.rejection_reason ? 'rejected' : 'pending';
+      if (r.rows.length > 0) {
+        status = branchRole.rejection_reason || r.rows[0].rejection_reason
+          ? 'rejected'
+          : r.rows[0].is_approved ? 'approved' : 'pending';
       }
     } else if (branchRole.role_name === 'school') {
       const r = await pool.query(
-        'SELECT is_approved FROM schools WHERE user_id = $1 AND deleted_at IS NULL',
+        `SELECT s.is_approved, u.rejection_reason
+         FROM epdg.schools s
+         JOIN epdg.users u ON u.id = s.user_id AND u.deleted_at IS NULL
+         WHERE s.user_id = $1 AND s.deleted_at IS NULL`,
         [user.id]
       );
-      if (r.rows.length > 0 && !r.rows[0].is_approved) {
-        status = branchRole.rejection_reason ? 'rejected' : 'pending';
+      if (r.rows.length > 0) {
+        status = branchRole.rejection_reason || r.rows[0].rejection_reason
+          ? 'rejected'
+          : r.rows[0].is_approved ? 'approved' : 'pending';
       }
     } else if (branchRole.role_name === 'intern') {
       const r = await pool.query(
         'SELECT is_approved, rejection_reason FROM intern_profiles WHERE user_id = $1',
         [user.id]
       );
-      if (r.rows.length > 0 && !r.rows[0].is_approved) {
-        status = r.rows[0].rejection_reason ? 'rejected' : 'pending';
+      if (r.rows.length > 0) {
+        status = branchRole.rejection_reason || r.rows[0].rejection_reason
+          ? 'rejected'
+          : r.rows[0].is_approved ? 'approved' : 'pending';
       }
     } else if (branchRole.role_name === 'admin') {
       const r = await pool.query(
@@ -212,6 +257,7 @@ export class AuthService {
         [user.id]
       );
       if (r.rows.length > 0) {
+        if (!branchRole.rejection_reason) status = 'approved';
         is_mentor             = r.rows[0].is_mentor             ?? false;
         force_password_change = r.rows[0].force_password_change ?? false;
       }
@@ -247,22 +293,48 @@ export class AuthService {
     if (!valid) throw new Error('Current password is incorrect');
 
     const hashed = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    await pool.query('UPDATE core.users SET password = $1 WHERE id = $2', [hashed, userId]);
-    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
-    await pool.query('UPDATE epdg.users SET password = $1 WHERE id = $2', [hashed, userId]);
-    await pool.query(
-      'UPDATE admins SET force_password_change = FALSE WHERE user_id = $1',
-      [userId]
-    );
+    await withTransaction(async (client) => {
+      const coreUpdate = await client.query(
+        'UPDATE core.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashed, userId],
+      );
+      const epdgUpdate = await client.query(
+        'UPDATE epdg.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashed, userId],
+      );
+      requireMirroredUpdates(coreUpdate, epdgUpdate);
+      await client.query(
+        'UPDATE epdg.admins SET force_password_change = FALSE WHERE user_id = $1',
+        [userId],
+      );
+    });
   }
 
   async refreshToken(token: string): Promise<{ token: string }> {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: number };
+    let decoded: { id?: unknown; purpose?: unknown };
+    try {
+      decoded = jwt.verify(
+        token,
+        requireEnvironmentVariable('JWT_SECRET'),
+        { algorithms: ['HS256'] },
+      ) as { id?: unknown; purpose?: unknown };
+    } catch {
+      throw new Error('Invalid access token');
+    }
+    if (
+      decoded.purpose !== 'access' ||
+      !Number.isInteger(decoded.id) ||
+      Number(decoded.id) < 1
+    ) {
+      throw new Error('Invalid access token');
+    }
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE id = $1 AND deleted_at IS NULL',
-      [decoded.id]
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.id = $1 AND cu.deleted_at IS NULL`,
+      [Number(decoded.id)]
     );
 
     if (result.rows.length === 0) {
@@ -292,7 +364,9 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE verification_token = $1 AND deleted_at IS NULL',
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.verification_token = $1 AND cu.deleted_at IS NULL`,
       [token]
     );
 
@@ -306,22 +380,32 @@ export class AuthService {
       throw new Error('Verification token has expired');
     }
 
-    await pool.query(
-      'UPDATE core.users SET is_verified = true, verification_token = NULL, token_expires_at = NULL WHERE id = $1',
-      [user.id]
-    );
-    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
-    await pool.query(
-      'UPDATE epdg.users SET is_verified = true, verification_token = NULL, token_expires_at = NULL WHERE id = $1',
-      [user.id]
-    );
+    await withTransaction(async (client) => {
+      const coreUpdate = await client.query(
+        `UPDATE core.users
+         SET is_verified = true, verification_token = NULL, token_expires_at = NULL
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id`,
+        [user.id],
+      );
+      const epdgUpdate = await client.query(
+        `UPDATE epdg.users
+         SET is_verified = true, verification_token = NULL, token_expires_at = NULL
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id`,
+        [user.id],
+      );
+      requireMirroredUpdates(coreUpdate, epdgUpdate);
+    });
   }
 
   async resendVerification(email: string): Promise<{ message: string }> {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.email = $1 AND cu.deleted_at IS NULL`,
       [email]
     );
 
@@ -338,15 +422,23 @@ export class AuthService {
     const verificationToken = randomUUID();
     const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    await pool.query(
-      'UPDATE core.users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
-      [verificationToken, tokenExpiresAt, user.id]
-    );
-    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
-    await pool.query(
-      'UPDATE epdg.users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
-      [verificationToken, tokenExpiresAt, user.id]
-    );
+    await withTransaction(async (client) => {
+      const coreUpdate = await client.query(
+        `UPDATE core.users
+         SET verification_token = $1, token_expires_at = $2
+         WHERE id = $3 AND deleted_at IS NULL
+         RETURNING id`,
+        [verificationToken, tokenExpiresAt, user.id],
+      );
+      const epdgUpdate = await client.query(
+        `UPDATE epdg.users
+         SET verification_token = $1, token_expires_at = $2
+         WHERE id = $3 AND deleted_at IS NULL
+         RETURNING id`,
+        [verificationToken, tokenExpiresAt, user.id],
+      );
+      requireMirroredUpdates(coreUpdate, epdgUpdate);
+    });
 
     this.sendVerificationEmail(email, verificationToken).catch((err) => {
       logger.error('Failed to send verification email', err);
@@ -359,7 +451,9 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE email = $1 AND deleted_at IS NULL',
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.email = $1 AND cu.deleted_at IS NULL`,
       [email]
     );
 
@@ -370,17 +464,15 @@ export class AuthService {
     const user = result.rows[0];
     const resetToken = jwt.sign(
       { id: user.id, purpose: 'password_reset' },
-      JWT_SECRET,
-      { expiresIn: '30m' }
+      requireEnvironmentVariable('JWT_SECRET'),
+      { algorithm: 'HS256', expiresIn: '30m' }
     );
 
-    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+    const frontendBase = requireEnvironmentVariable('FRONTEND_URL').replace(/\/$/, '');
     const resetUrl = `${frontendBase}/reset-password?token=${resetToken}`;
 
-    logger.warn(`Dev mode — password reset URL: ${resetUrl}`);
-
-    this.sendPasswordResetEmail(user.email, resetUrl).catch((err) => {
-      logger.error('Failed to send password reset email', err);
+    this.sendPasswordResetEmail(user.email, resetUrl).catch(() => {
+      logger.error('Password reset email delivery failed');
     });
 
     return { message: 'Reset link sent.' };
@@ -389,7 +481,11 @@ export class AuthService {
   async resetPassword(token: string, newPassword: string): Promise<{ message: string }> {
     let decoded: { id: number; purpose: string };
     try {
-      decoded = jwt.verify(token, JWT_SECRET) as { id: number; purpose: string };
+      decoded = jwt.verify(
+        token,
+        requireEnvironmentVariable('JWT_SECRET'),
+        { algorithms: ['HS256'] },
+      ) as { id: number; purpose: string };
     } catch {
       throw new Error('Invalid or expired reset token');
     }
@@ -401,7 +497,9 @@ export class AuthService {
     const pool = getPool();
 
     const result = await pool.query(
-      'SELECT * FROM core.users WHERE id = $1 AND deleted_at IS NULL',
+      `SELECT cu.* FROM core.users cu
+       JOIN epdg.users eu ON eu.id = cu.id AND eu.deleted_at IS NULL
+       WHERE cu.id = $1 AND cu.deleted_at IS NULL`,
       [decoded.id]
     );
 
@@ -411,15 +509,17 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-    await pool.query(
-      'UPDATE core.users SET password = $1 WHERE id = $2',
-      [hashedPassword, decoded.id]
-    );
-    // TEMPORARY: keep the epdg.users mirror in sync until epdg.* FKs are repointed at core.users
-    await pool.query(
-      'UPDATE epdg.users SET password = $1 WHERE id = $2',
-      [hashedPassword, decoded.id]
-    );
+    await withTransaction(async (client) => {
+      const coreUpdate = await client.query(
+        'UPDATE core.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashedPassword, decoded.id],
+      );
+      const epdgUpdate = await client.query(
+        'UPDATE epdg.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashedPassword, decoded.id],
+      );
+      requireMirroredUpdates(coreUpdate, epdgUpdate);
+    });
 
     return { message: 'Password has been reset successfully.' };
   }
@@ -466,16 +566,24 @@ export class AuthService {
   }
 
   private generateToken(user: { id: number; email: string }, role: string, admin_role?: string): string {
-    const payload: Record<string, unknown> = { id: user.id, email: user.email, role };
+    const payload: Record<string, unknown> = {
+      id: user.id,
+      email: user.email,
+      role,
+      purpose: 'access',
+    };
     if (admin_role) payload.admin_role = admin_role;
-    return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
+    return jwt.sign(payload, requireEnvironmentVariable('JWT_SECRET'), {
+      algorithm: 'HS256',
+      expiresIn: '1h',
+    });
   }
 
   private async sendVerificationEmail(email: string, token: string): Promise<void> {
-    const verificationUrl = `${(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '')}/verify-email?token=${token}`;
+    const verificationUrl = `${requireEnvironmentVariable('FRONTEND_URL').replace(/\/$/, '')}/verify-email?token=${token}`;
 
-    const { data, error } = await getResend().emails.send({
-      from: process.env.SMTP_FROM || 'onboarding@resend.dev',
+    const { error } = await getResend().emails.send({
+      from: requireEnvironmentVariable('SMTP_FROM'),
       to: email,
       subject: 'Verify your email — Emerson Empire',
       html: `
@@ -514,16 +622,15 @@ export class AuthService {
     });
 
     if (error) {
-      logger.error(`Resend failed to send verification email: ${JSON.stringify(error)}`);
-      logger.warn(`Verification URL (fallback): ${verificationUrl}`);
+      logger.error('Verification email delivery failed');
     } else {
-      logger.success(`Verification email sent to ${email} — id: ${data?.id}`);
+      logger.success('Verification email accepted by provider');
     }
   }
 
   private async sendPasswordResetEmail(email: string, resetUrl: string): Promise<void> {
-    const { data, error } = await getResend().emails.send({
-      from: process.env.SMTP_FROM || 'onboarding@resend.dev',
+    const { error } = await getResend().emails.send({
+      from: requireEnvironmentVariable('SMTP_FROM'),
       to: email,
       subject: 'Reset your password — Emerson Empire',
       html: `
@@ -562,10 +669,9 @@ export class AuthService {
     });
 
     if (error) {
-      logger.error(`Resend failed to send password reset email: ${JSON.stringify(error)}`);
-      logger.warn(`Reset URL (fallback): ${resetUrl}`);
+      logger.error('Password reset email delivery failed');
     } else {
-      logger.success(`Password reset email sent to ${email} — id: ${data?.id}`);
+      logger.success('Password reset email accepted by provider');
     }
   }
 }

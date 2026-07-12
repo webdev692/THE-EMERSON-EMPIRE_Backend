@@ -30,7 +30,7 @@ const router = Router();
  *           type: string
  *         role:
  *           type: string
- *           enum: [admin, company, intern, school]
+ *           enum: [company, intern, school]
  *         country:
  *           type: string
  *         county:
@@ -177,7 +177,7 @@ router.post(
     body('name').trim().notEmpty().withMessage('Name is required'),
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-    body('role').isIn(['admin', 'company', 'intern', 'school']).withMessage('Invalid role'),
+    body('role').isIn(['company', 'intern', 'school']).withMessage('Public registration is available for company, intern, or school accounts'),
   ],
   AuthController.register
 );
@@ -206,7 +206,7 @@ router.post(
  */
 router.post(
   '/login',
-  loginLimiter, 
+  loginLimiter,
   [
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('password').notEmpty().withMessage('Password is required'),
@@ -246,13 +246,13 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post(
-  '/refresh',
-  [
-    body('token').notEmpty().withMessage('Token is required'),
-  ],
-  AuthController.refreshToken
-);
+router.post('/refresh', (_req, res) => {
+  res.status(503).json({
+    success: false,
+    message: 'Token refresh is unavailable until rotating revocation state is configured.',
+    errors: [],
+  });
+});
 
 /**
  * @swagger

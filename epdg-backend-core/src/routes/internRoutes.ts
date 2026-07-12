@@ -1,13 +1,20 @@
-import { Router } from 'express';
-import multer from 'multer';
+import { Request, Response, Router } from 'express';
 import { authMiddleware, roleGuard } from '../middlewares/auth';
 import * as InternController from '../controllers/InternController';
 import * as ApplicationController from '../controllers/ApplicationController';
 import * as CareerFileController from '../controllers/CareerFileController';
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-
 const router = Router();
+
+function unavailable(feature: string) {
+  return (_req: Request, res: Response) => {
+    res.status(503).json({
+      success: false,
+      message: `${feature} is temporarily unavailable.`,
+      errors: [],
+    });
+  };
+}
 
 router.use(authMiddleware);
 
@@ -20,13 +27,13 @@ router.patch('/profile', roleGuard('intern'), InternController.updateProfile);
 
 // Onboarding — new flow (must come before :stepId route)
 router.get('/onboarding/status',              roleGuard('intern'), InternController.getOnboardingStatus);
-router.post('/onboarding/sign-agreement',     roleGuard('intern'), InternController.signAgreement);
+router.post('/onboarding/sign-agreement',     roleGuard('intern'), unavailable('Agreement acceptance'));
 router.post('/onboarding/confirm-track',      roleGuard('intern'), InternController.confirmTrack);
 router.post('/onboarding/submit-discovery',   roleGuard('intern'), InternController.submitDiscovery);
 
 // Onboarding — legacy step flow (kept for backwards compatibility)
 router.get('/onboarding',                    roleGuard('intern'), InternController.getOnboarding);
-router.patch('/onboarding/:stepId/complete', roleGuard('intern'), InternController.completeOnboardingStep);
+router.patch('/onboarding/:stepId/complete', roleGuard('intern'), unavailable('Legacy onboarding completion'));
 
 // Applications / Slots
 router.get('/slots',        roleGuard('intern'), ApplicationController.getOpenSlots);
@@ -44,9 +51,9 @@ router.patch('/tasks/:id',   roleGuard('intern'), InternController.updateTaskSta
 
 // Submissions
 router.get('/submissions',                                                          roleGuard('intern'), InternController.getSubmissions);
-router.post('/submissions/upload', roleGuard('intern'), upload.single('file'),      InternController.uploadSubmissionFile);
-router.post('/submissions',                                                         roleGuard('intern'), InternController.createSubmission);
-router.patch('/submissions/:id',                                                    roleGuard('intern'), InternController.resubmit);
+router.post('/submissions/upload', roleGuard('intern'), unavailable('Private submission upload'));
+router.post('/submissions',        roleGuard('intern'), unavailable('Private submission delivery'));
+router.patch('/submissions/:id',   roleGuard('intern'), unavailable('Private resubmission delivery'));
 
 // Leaderboard
 router.get('/leaderboard',    roleGuard('intern'), InternController.getLeaderboard);
@@ -71,7 +78,7 @@ router.get('/mentors-directory', roleGuard('intern'), InternController.getMentor
 router.get('/mentor',                        roleGuard('intern'), InternController.getMentor);
 router.get('/mentor/sessions',               roleGuard('intern'), InternController.getMentorSessions);
 router.post('/mentor/sessions',              roleGuard('intern'), InternController.requestMentorSession);
-router.patch('/mentor/sessions/:id/rate',    roleGuard('intern'), InternController.rateMentorSession);
+router.patch('/mentor/sessions/:id/rate',    roleGuard('intern'), unavailable('Intern session feedback'));
 
 // Progress
 router.get('/progress/stats',  roleGuard('intern'), InternController.getProgressStats);

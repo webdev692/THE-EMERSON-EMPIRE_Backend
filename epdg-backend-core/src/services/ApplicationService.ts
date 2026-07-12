@@ -2,13 +2,15 @@ import { Resend } from 'resend';
 import { getPool } from '../db';
 import { parseCvFromUrl } from '../utils/cvParser';
 import { logger } from '../utils/logger';
+import { requireEnvironmentVariable } from '../config/env';
+import { escapeHtml, sanitizeEmailSubject } from '../utils/emailSafety';
 
 function getResend() {
   if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY not set');
   return new Resend(process.env.RESEND_API_KEY);
 }
-const FROM     = () => process.env.SMTP_FROM     || 'noreply@theemersonempire.info';
-const FRONTEND = () => (process.env.FRONTEND_URL || 'https://epdg.netlify.app').replace(/\/$/, '');
+const FROM = () => requireEnvironmentVariable('SMTP_FROM');
+const FRONTEND = () => requireEnvironmentVariable('FRONTEND_URL').replace(/\/$/, '');
 
 async function sendMail(to: string | string[], subject: string, bodyHtml: string) {
   const html = `
@@ -25,7 +27,7 @@ async function sendMail(to: string | string[], subject: string, bodyHtml: string
               <hr style="border:none;border-top:1px solid #eee;margin:32px 0;">
               <p style="color:#aaa;font-size:12px;margin:0;">
                 © Emerson Professional Development Group ·
-                <a href="mailto:support@theemersonempire.info" style="color:#aaa;">support@theemersonempire.info</a>
+                Emerson Professional Development Group
               </p>
             </td></tr>
           </table>
@@ -33,8 +35,13 @@ async function sendMail(to: string | string[], subject: string, bodyHtml: string
       </table>
     </body></html>
   `;
-  const { error } = await getResend().emails.send({ from: FROM(), to, subject, html });
-  if (error) logger.error(`Resend error [${subject}]: ${JSON.stringify(error)}`);
+  const { error } = await getResend().emails.send({
+    from: FROM(),
+    to,
+    subject: sanitizeEmailSubject(subject),
+    html,
+  });
+  if (error) logger.error('Application email delivery failed');
 }
 
 export class ApplicationService {
@@ -184,6 +191,9 @@ export class ApplicationService {
 
     if (!infoRes.rows.length) return;
     const { intern_name, intern_email, slot_title, company_name } = infoRes.rows[0];
+    const safeInternName = escapeHtml(intern_name);
+    const safeSlotTitle = escapeHtml(slot_title);
+    const safeCompanyName = escapeHtml(company_name);
 
     // Fetch all admin / super_admin emails
     const adminRes = await pool.query(`
@@ -198,8 +208,8 @@ export class ApplicationService {
     // 1. Confirmation to intern
     const internBody = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Hi <strong>${intern_name}</strong>, we have received your application for
-        <strong>${slot_title}</strong> at <strong>${company_name}</strong>.
+        Hi <strong>${safeInternName}</strong>, we have received your application for
+        <strong>${safeSlotTitle}</strong> at <strong>${safeCompanyName}</strong>.
       </p>
       <p style="font-size:15px;color:#555;line-height:1.6;">
         Our team will review your application and get back to you. You can track the status
@@ -222,9 +232,9 @@ export class ApplicationService {
           A new internship application has been submitted.
         </p>
         <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
-          <p style="margin:0 0 6px;font-size:14px;color:#374151;">👤 Applicant: <strong>${intern_name}</strong></p>
-          <p style="margin:0 0 6px;font-size:14px;color:#374151;">📌 Position: <strong>${slot_title}</strong></p>
-          <p style="margin:0;font-size:14px;color:#374151;">🏢 Company: <strong>${company_name}</strong></p>
+          <p style="margin:0 0 6px;font-size:14px;color:#374151;">👤 Applicant: <strong>${safeInternName}</strong></p>
+          <p style="margin:0 0 6px;font-size:14px;color:#374151;">📌 Position: <strong>${safeSlotTitle}</strong></p>
+          <p style="margin:0;font-size:14px;color:#374151;">🏢 Company: <strong>${safeCompanyName}</strong></p>
         </div>
         <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
           <tr><td style="background:#4B1E91;border-radius:8px;">
@@ -247,6 +257,7 @@ export class ApplicationService {
     const { rows } = await pool.query(`
       SELECT
         a.id,
+        a.slot_id,
         a.status,
         a.applied_at,
         a.cover_letter,
@@ -278,6 +289,7 @@ export class ApplicationService {
     const { rows } = await pool.query(`
       SELECT
         a.id,
+        a.slot_id,
         a.status,
         a.applied_at,
         a.cover_letter,

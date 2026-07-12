@@ -1,55 +1,43 @@
-import { Pool, PoolClient } from "pg";
-import { migrate } from "postgres-migrations";
-import path from "path";
+import { Pool, PoolClient } from 'pg';
+import { migrate } from 'postgres-migrations';
+import path from 'path';
+import { logger } from '../utils/logger';
 
 let pool: Pool | null = null;
 
 function getSslConfig() {
-  if (process.env.DB_SSL === "true") {
-    return { rejectUnauthorized: false };
+  if (process.env.DB_SSL === 'true') {
+    return { rejectUnauthorized: true };
   }
-
-  if (process.env.DB_SSL === "false") {
-    return false;
-  }
-
   if (
-    process.env.NODE_ENV === "production" ||
-    process.env.DB_HOST?.includes("supabase.com")
+    process.env.NODE_ENV === 'production' ||
+    process.env.DB_HOST?.endsWith('.supabase.com') ||
+    process.env.DB_HOST?.endsWith('.supabase.co')
   ) {
-    return { rejectUnauthorized: false };
+    return { rejectUnauthorized: true };
   }
-
   return false;
 }
 
 export function getPool(): Pool {
   if (!pool) {
-    const required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
+    const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
     const missing = required.filter((key) => !process.env[key]);
     if (missing.length > 0) {
-      throw new Error(
-        `Missing required environment variables: ${missing.join(", ")}`,
-      );
+      throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
     }
 
-    const dbConfig = {
+    pool = new Pool({
       host: process.env.DB_HOST,
       port: Number(process.env.DB_PORT) || 5432,
       database: process.env.DB_NAME,
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
       ssl: getSslConfig(),
-      // epdg must come before public: unqualified table/type names in
-      // services/controllers, and in the CREATE-IF-NOT-EXISTS DDL of
-      // migrations 001-031, must resolve to the epdg schema now that
-      // migration 032 has moved those objects there. Sent as a startup
-      // parameter (not a post-connect SET) so it is applied even when
-      // DB_HOST is a transaction-mode connection pooler.
-      options: "-c search_path=epdg,public",
-    };
-
-    pool = new Pool(dbConfig);
+      options: '-c search_path=epdg,public',
+      connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 5000),
+      statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 15000),
+    });
   }
   return pool;
 }
@@ -57,7 +45,7 @@ export function getPool(): Pool {
 export async function testConnection(): Promise<void> {
   const client = await getPool().connect();
   try {
-    await client.query("SELECT 1");
+    await client.query('SELECT 1');
   } finally {
     client.release();
   }
@@ -74,28 +62,29 @@ async function ensureMigrationTable(client: PoolClient) {
   `);
 }
 
-export async function performMigration() {
+/**
+ * Manual-only migration entrypoint. Application startup never calls this.
+ * Hash mismatches are intentionally fatal: migration history is evidence and
+ * must not be erased or replayed automatically.
+ */
+export async function performMigration(): Promise<void> {
+  if (process.env.ALLOW_DATABASE_MIGRATIONS !== 'true') {
+    throw new Error(
+      'Database migrations are disabled. Set ALLOW_DATABASE_MIGRATIONS only after the migration set is reviewed.',
+    );
+  }
+
   const client = await getPool().connect();
-  const migrationsPath = path.join(__dirname, "migrations");
+  const migrationsPath = path.join(__dirname, 'migrations');
 
   try {
     await ensureMigrationTable(client);
-    console.info("Starting database migration...");
-    try {
-      await migrate({ client }, migrationsPath);
-    } catch (e: any) {
-      if (e?.message?.includes("Hashes don't match")) {
-        console.warn("Migration hash mismatch — resetting tracking table and retrying...");
-        await client.query("DELETE FROM public.migrations");
-        await migrate({ client }, migrationsPath);
-      } else {
-        throw e;
-      }
-    }
-    console.info("Database migration completed successfully.");
-  } catch (e: any) {
-    console.error("Error occurred while migrating:", e);
-    throw e;
+    logger.info('Starting reviewed database migration');
+    await migrate({ client }, migrationsPath);
+    logger.success('Database migration completed');
+  } catch (error) {
+    logger.error('Database migration failed', error);
+    throw error;
   } finally {
     client.release();
   }

@@ -105,3 +105,41 @@ No external state changed. The two local commits are unpublished and remain revi
 - Nested EPDG Git repository check: passed.
 
 The verification above is local worktree evidence only. No backend deployment, Railway environment change, live database migration, external storage change, merge, or production verification occurred.
+
+## 2026-07-12 - Branch publication and failed Railway integration deployment
+
+### Git and review evidence
+
+- Published `codex/full-stack-release-2026-07-11` with commits `9c41b24`, `cc605ca`, and `f7298b3`.
+- Opened draft backend PR `webdev692/THE-EMERSON-EMPIRE_Backend#2` from the release branch into `main`.
+- No merge, history rewrite, force push, or manual deployment command occurred.
+
+### Railway evidence
+
+- GitHub attached a Railway status to exact backend head `f7298b3` with context `epdg platform - tranquil-tenderness`.
+- The status identifies Railway project `34659053-7658-4d6e-8d0e-469f91ec6058` and service `fccb017f-ec3a-472e-ab19-f72011bf84f7`, proving a repository-to-service integration for this commit.
+- The current-head Railway status is `failure`; it is not release verification and must not be converted to success without deployment logs and a current-commit health check.
+- Railway CLI authentication remained unavailable after the browser OAuth flow timed out, so the failed deployment logs, configured root directory, environment names, and runtime database role could not be inspected.
+- Read-only public probes found `https://tranquil-tenderness-productionepdg.up.railway.app/health` at `200` and `OPTIONS /api/auth/login` at `204`. That running host predates the failed current-head deployment and is not evidence that `f7298b3` is live.
+- No production environment-variable value was read, printed, or changed.
+
+### Updated release and rollback boundary
+
+The provider's Git integration attempted and failed a deployment after the branch push. No successful backend release occurred. Preserve the last working Railway deployment while the failure is diagnosed; do not redeploy, promote, or change environment variables until authenticated provider logs prove the service root/build/start contract. If a later verified deployment fails, roll back through Railway to the last known-good deployment of this same service and repeat privacy-safe health, CORS, authentication, and route-guard probes. Database compensation remains forward-only.
+
+## 2026-07-12 - Authenticated Railway diagnosis and explicit CORS preparation
+
+### Provider mapping and failed-build diagnosis
+
+- Authenticated Railway UI evidence maps project `epdg platform`, service `tranquil-tenderness`, repository `webdev692/THE-EMERSON-EMPIRE_Backend`, and service root `/epdg-backend-core`.
+- Environment `production_epdg` owns the running public host `tranquil-tenderness-productionepdg.up.railway.app`.
+- The failed PR deployment log showed the explicit `npm ci` in `railway.toml` ran after Railway had already installed dependencies and failed with `EBUSY` on the mounted `/app/node_modules/.cache` directory.
+- `epdg-backend-core/railway.toml` now leaves deterministic installation to Railway/Nixpacks and retains only `npm run build` as the application build command. Local clean installation, build, lint, route/security tests, and configuration assertions passed before publication.
+
+### CORS environment preparation
+
+- Added the non-secret `CORS_ORIGINS` variable to `production_epdg` with only the canonical production frontend and PR #27 preview origins; no wildcard was used and no secret value was read or printed.
+- Railway applied the variable change. The currently running older backend still accepts the production origin (`204`) but rejects both the PR preview and an untrusted origin (`500`), proving the old deployment does not consume the new environment-driven allowlist.
+- Do not treat CORS as verified until the hardened backend commit is deployed and exact preflight checks return the requested origin for both production and PR preview while continuing to deny an untrusted origin.
+
+No backend merge, successful backend code deployment, database migration, Edge Function deployment, or frontend merge occurred during this step. If the next deployment regresses health or route guards, roll back the Railway service to its last known-good deployment and retain the explicit origin allowlist for the corrected release.

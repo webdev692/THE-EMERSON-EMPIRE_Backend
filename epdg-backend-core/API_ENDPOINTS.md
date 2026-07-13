@@ -194,9 +194,9 @@ The intern's self-service surface — everything they see and do day to day.
 | GET | `/tasks` | Tasks assigned to the intern by their mentor/placement. |
 | PATCH | `/tasks/:id` | Update a task's status. |
 | GET | `/submissions` | List the intern's work submissions and their review status. |
-| POST | `/submissions/upload` | Upload a file for a submission (multipart, 20MB limit). |
-| POST | `/submissions` | Create a submission record. |
-| PATCH | `/submissions/:id` | Resubmit after feedback/rejection. |
+| POST | `/submissions/upload` | Intentionally unavailable (`503`): private submission storage ownership and delivery are not approved. |
+| POST | `/submissions` | Intentionally unavailable (`503`): private submission delivery is not approved. |
+| PATCH | `/submissions/:id` | Intentionally unavailable (`503`): private resubmission delivery is not approved. |
 
 ### 4.6 Gamification (intern side)
 | Method | Path | Why |
@@ -225,7 +225,7 @@ The intern's self-service surface — everything they see and do day to day.
 | GET | `/mentor` | The intern's own assigned mentor's info. |
 | GET | `/mentor/sessions` | List mentorship sessions (past/upcoming). |
 | POST | `/mentor/sessions` | Request a session with the assigned mentor. |
-| PATCH | `/mentor/sessions/:id/rate` | Rate a completed session. |
+| PATCH | `/mentor/sessions/:id/rate` | Intentionally unavailable (`503`): feedback visibility and lifecycle rules are not approved. |
 
 ### 4.10 Progress
 | Method | Path | Why |

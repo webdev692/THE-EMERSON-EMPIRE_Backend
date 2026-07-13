@@ -178,6 +178,11 @@ router.post(
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     body('role').isIn(['company', 'intern', 'school']).withMessage('Public registration is available for company, intern, or school accounts'),
+    body('school_type')
+      .if(body('role').equals('school'))
+      .optional()
+      .isIn(['university', 'college', 'polytechnic', 'tvet'])
+      .withMessage('School type must be university, college, polytechnic, or tvet'),
   ],
   AuthController.register
 );

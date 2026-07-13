@@ -87,6 +87,30 @@ test('public registration cannot create administrator accounts', async () => {
   assert.equal(body.success, false);
 });
 
+test('school registration rejects non-lowercase school types before database access', async () => {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Test School',
+      email: 'test-school@example.invalid',
+      password: 'safe-test-password',
+      role: 'school',
+      school_type: 'University',
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    success: false,
+    message: 'Validation failed',
+    errors: [{
+      field: 'school_type',
+      message: 'School type must be university, college, polytechnic, or tvet',
+    }],
+  });
+});
+
 test('validation responses never echo password values', async () => {
   const password = 'p@ss';
   const response = await fetch(`${baseUrl}/api/auth/register`, {

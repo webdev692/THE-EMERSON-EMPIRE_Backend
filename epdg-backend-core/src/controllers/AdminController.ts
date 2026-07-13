@@ -223,8 +223,12 @@ export const getMentors = async (req: Request, res: Response) => {
 export const createMentor = async (req: Request, res: Response) => {
   try {
     const { name, email, password, department, max_capacity } = req.body;
-    if (!name || !email || !password) {
+    if (!name || !email || typeof password !== 'string') {
       res.status(400).json({ success: false, message: 'name, email and password are required', errors: [] });
+      return;
+    }
+    if (password.length < 8 || password.length > 128) {
+      res.status(400).json({ success: false, message: 'password must be between 8 and 128 characters', errors: [] });
       return;
     }
     const mentor = await adminService.createMentor({
@@ -245,12 +249,12 @@ export const createMentor = async (req: Request, res: Response) => {
 export const resetMentorPassword = async (req: Request, res: Response) => {
   try {
     const { password } = req.body;
-    if (!password || password.length < 8) {
-      res.status(400).json({ success: false, message: 'password must be at least 8 characters', errors: [] });
+    if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+      res.status(400).json({ success: false, message: 'password must be between 8 and 128 characters', errors: [] });
       return;
     }
     const result = await adminService.resetMentorPassword(Number(req.params.id), password);
-    res.json({ success: true, message: `Password reset for ${result.name}. Credentials email sent.` });
+    res.json({ success: true, message: `Password reset for ${result.name}. Email delivery is processed separately.` });
   } catch (err: any) {
     const code = err.message === 'Mentor not found.' ? 404 : 500;
     res.status(code).json({ success: false, message: err.message, errors: [] });

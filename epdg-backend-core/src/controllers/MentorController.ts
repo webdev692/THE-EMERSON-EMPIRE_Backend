@@ -17,14 +17,14 @@ export const getStats = async (req: Request, res: Response) => {
       pool.query(
         `SELECT COUNT(*) FROM intern_profiles ip
          JOIN users u ON u.id = ip.user_id
-         WHERE ip.mentor_name = $1 AND u.deleted_at IS NULL`,
-        [mentorName]
+         WHERE ip.mentor_id = $1 AND u.deleted_at IS NULL`,
+        [userId]
       ),
       pool.query(
         `SELECT COUNT(*) FROM intern_profiles ip
          JOIN users u ON u.id = ip.user_id
-         WHERE ip.mentor_name = $1 AND ip.onboarding_complete = TRUE AND u.deleted_at IS NULL`,
-        [mentorName]
+         WHERE ip.mentor_id = $1 AND ip.onboarding_complete = TRUE AND u.deleted_at IS NULL`,
+        [userId]
       ),
     ]);
 
@@ -46,12 +46,6 @@ export const getMyInterns = async (req: Request, res: Response) => {
   try {
     const pool = getPool();
     const userId = (req as AuthRequest).user.id;
-    const { rows: me } = await pool.query(
-      'SELECT u.name FROM admins a JOIN users u ON u.id = a.user_id WHERE a.user_id = $1',
-      [userId]
-    );
-    const mentorName = me[0]?.name ?? '';
-
     const { rows } = await pool.query(
       `SELECT
          u.id, u.name, u.email, u.created_at,
@@ -61,9 +55,9 @@ export const getMyInterns = async (req: Request, res: Response) => {
          ip.onboarding_status, ip.discovery_problem
        FROM intern_profiles ip
        JOIN users u ON u.id = ip.user_id
-       WHERE ip.mentor_name = $1 AND u.deleted_at IS NULL
+       WHERE ip.mentor_id = $1 AND u.deleted_at IS NULL
        ORDER BY u.created_at DESC`,
-      [mentorName]
+      [userId]
     );
 
     res.json({ success: true, data: rows });
@@ -80,17 +74,11 @@ export const activateRoadmap = async (req: Request, res: Response) => {
     const internUserId = Number(req.params.userId);
 
     // Confirm this intern is actually assigned to this mentor
-    const { rows: me } = await pool.query(
-      'SELECT u.name FROM admins a JOIN users u ON u.id = a.user_id WHERE a.user_id = $1',
-      [mentorId]
-    );
-    const mentorName = me[0]?.name ?? '';
-
     const { rows } = await pool.query(
       `SELECT ip.id, ip.onboarding_status
        FROM intern_profiles ip
-       WHERE ip.user_id = $1 AND ip.mentor_name = $2`,
-      [internUserId, mentorName]
+       WHERE ip.user_id = $1 AND ip.mentor_id = $2`,
+      [internUserId, mentorId]
     );
 
     if (!rows.length) {

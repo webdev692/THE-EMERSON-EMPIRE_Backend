@@ -1,7 +1,13 @@
 import { Router } from 'express';
 import * as UserController from '../controllers/UserController';
+import { authMiddleware, roleGuard } from '../middlewares/auth';
 
 const router = Router();
+
+// Legacy scaffold routes are not used by the current frontend. Keep them
+// inaccessible to browser visitors while they remain mounted for compatibility.
+router.use(authMiddleware);
+router.use(roleGuard('admin'));
 
 /**
  * @swagger

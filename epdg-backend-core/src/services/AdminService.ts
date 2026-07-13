@@ -1,9 +1,12 @@
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { Resend } from 'resend';
+import type { PoolClient } from 'pg';
 import { getPool } from '../db';
 import { logger } from '../utils/logger';
 import { createDualWriteUser } from '../utils/coreIdentity';
+import { requireEnvironmentVariable } from '../config/env';
+import { escapeHtml, sanitizeEmailSubject } from '../utils/emailSafety';
 
 function generateTempPassword(): string {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
@@ -16,8 +19,17 @@ function getResend() {
   return new Resend(process.env.RESEND_API_KEY);
 }
 
-const FROM = () => process.env.SMTP_FROM || 'noreply@theemersonempire.info';
-const FRONTEND = () => (process.env.FRONTEND_URL || 'https://epdg.netlify.app').replace(/\/$/, '');
+const FROM = () => requireEnvironmentVariable('SMTP_FROM');
+const FRONTEND = () => requireEnvironmentVariable('FRONTEND_URL').replace(/\/$/, '');
+
+function requireSingleRow(
+  result: { rowCount: number | null },
+  operation: string,
+): void {
+  if (result.rowCount !== 1) {
+    throw new Error(`${operation} failed because the expected record was not found`);
+  }
+}
 
 export class AdminService {
 
@@ -94,6 +106,7 @@ export class AdminService {
         ip.contact_phone    AS intern_phone,
         ip.course,
         ip.department       AS intern_department,
+        ip.mentor_id,
         ip.mentor_name,
         -- company fields
         c.company_name,
@@ -109,12 +122,15 @@ export class AdminService {
         s.is_approved    AS school_approved,
         s.school_type,
         s.contact_person AS school_contact,
+        s.contact_phone  AS school_phone,
         s.county         AS school_city,
-        s.website        AS school_website
+        s.website        AS school_website,
+        a.user_id        AS admin_profile_id
       FROM users u
       LEFT JOIN intern_profiles ip ON ip.user_id = u.id AND u.role = 'intern'
       LEFT JOIN companies        c  ON c.user_id  = u.id AND u.role = 'company'
       LEFT JOIN schools          s  ON s.user_id  = u.id AND u.role = 'school'
+      LEFT JOIN admins           a  ON a.user_id  = u.id AND u.role = 'admin'
       WHERE u.deleted_at IS NULL
       ORDER BY u.created_at DESC
     `);
@@ -142,11 +158,12 @@ export class AdminService {
       status:           'approved' | 'rejected';
       rejection_reason?: string;
       department?:       string;
-      mentor?:           string;
+      mentor_id?:        number;
     }
   ) {
     const pool   = getPool();
     const client = await pool.connect();
+    let committed = false;
 
     try {
       await client.query('BEGIN');
@@ -159,13 +176,16 @@ export class AdminService {
       if (!rows.length) throw new Error('User not found');
       const user = rows[0];
 
+      let approvedMentorName: string | undefined;
       if (payload.status === 'approved') {
-        await this.approve(client, user, adminId, payload);
+        const approval = await this.approve(client, user, adminId, payload);
+        approvedMentorName = approval.mentorName;
       } else {
         await this.reject(client, user, payload.rejection_reason || '');
       }
 
       await client.query('COMMIT');
+      committed = true;
 
       // Fire-and-forget notification email
       const emailRow = await pool.query(
@@ -179,7 +199,7 @@ export class AdminService {
             user.name,
             user.role,
             payload.department,
-            payload.mentor
+            approvedMentorName
           );
         } else {
           this.sendRejectionEmail(
@@ -193,18 +213,21 @@ export class AdminService {
       // Return updated normalised user
       const updated = await pool.query(`
         SELECT u.*, ip.is_approved AS intern_approved, c.is_approved AS company_approved, s.is_approved AS school_approved,
+               a.user_id AS admin_profile_id,
                c.industry, c.contact_person AS company_contact, c.country, c.county, c.website AS company_website,
-               s.school_type, s.contact_person AS school_contact, s.county AS school_city
+               s.school_type, s.contact_person AS school_contact, s.contact_phone AS school_phone,
+               s.county AS school_city
         FROM users u
         LEFT JOIN intern_profiles ip ON ip.user_id = u.id AND u.role = 'intern'
         LEFT JOIN companies c        ON c.user_id  = u.id AND u.role = 'company'
         LEFT JOIN schools   s        ON s.user_id  = u.id AND u.role = 'school'
+        LEFT JOIN admins    a        ON a.user_id  = u.id AND u.role = 'admin'
         WHERE u.id = $1
       `, [userId]);
 
       return this.normalise(updated.rows[0]);
     } catch (err) {
-      await client.query('ROLLBACK');
+      if (!committed) await client.query('ROLLBACK');
       throw err;
     } finally {
       client.release();
@@ -214,11 +237,26 @@ export class AdminService {
   // ─── Delete (soft) ───────────────────────────────────────────────────────────
 
   async deleteUser(userId: number) {
-    const pool = getPool();
-    await pool.query(
-      'UPDATE users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL',
-      [userId]
-    );
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      const epdgUpdate = await client.query(
+        'UPDATE epdg.users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id',
+        [userId],
+      );
+      requireSingleRow(epdgUpdate, 'EPDG user deletion');
+      const coreUpdate = await client.query(
+        'UPDATE core.users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id',
+        [userId],
+      );
+      requireSingleRow(coreUpdate, 'Core user deletion');
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   // ─── Create user manually ────────────────────────────────────────────────────
@@ -230,6 +268,12 @@ export class AdminService {
     department?: string;
     max_capacity?: number;
   }) {
+    if (data.role !== 'admin') {
+      throw new Error(
+        'Manual creation is unavailable for roles that require a complete application profile.',
+      );
+    }
+
     const pool   = getPool();
     const client = await pool.connect();
     try {
@@ -272,12 +316,21 @@ export class AdminService {
           [user.id, isMentor, adminType, dept, maxCap]
         );
 
-        this.sendAdminWelcomeEmail(data.email, data.name, plainPassword, adminType, dept);
-      } else {
-        this.sendUserWelcomeEmail(data.email, data.name, plainPassword, data.role);
       }
 
       await client.query('COMMIT');
+
+      if (data.role === 'admin') {
+        this.sendAdminWelcomeEmail(
+          data.email,
+          data.name,
+          plainPassword,
+          data.admin_type || 'general',
+          data.department || null,
+        );
+      } else {
+        this.sendUserWelcomeEmail(data.email, data.name, plainPassword, data.role);
+      }
       return user;
     } catch (err) {
       await client.query('ROLLBACK');
@@ -311,7 +364,7 @@ export class AdminService {
       JOIN internship_slots s  ON s.id   = a.slot_id
       JOIN companies        c  ON c.id   = s.company_id
       LEFT JOIN schools     sc ON sc.user_id = u.id
-      WHERE a.status = 'approved'
+      WHERE a.status = 'accepted'
         AND u.deleted_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM placements p WHERE p.application_id = a.id
@@ -332,31 +385,31 @@ export class AdminService {
     end_date: string;
   }) {
     const pool = getPool();
-
-    // Verify application exists and is approved
-    const appCheck = await pool.query(
-      `SELECT id FROM applications WHERE id = $1 AND status = 'approved'`,
-      [data.application_id]
-    );
-    if (!appCheck.rows.length) throw new Error('Application not found or not approved.');
-
-    // Prevent duplicate placement
-    const dupCheck = await pool.query(
-      `SELECT id FROM placements WHERE application_id = $1`, [data.application_id]
-    );
-    if (dupCheck.rows.length) throw new Error('A placement already exists for this application.');
-
     const { rows } = await pool.query(
       `INSERT INTO placements
          (application_id, intern_id, company_id, school_id, slot_id, mentor_id, start_date, end_date, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', NOW())
+       SELECT
+         a.id,
+         a.intern_id,
+         slot.company_id,
+         intern.school_id,
+         a.slot_id,
+         intern.mentor_id,
+         $2,
+         $3,
+         'active',
+         NOW()
+       FROM applications a
+       JOIN intern_profiles intern ON intern.id = a.intern_id
+       JOIN internship_slots slot ON slot.id = a.slot_id
+       WHERE a.id = $1 AND a.status = 'accepted'
+       ON CONFLICT (application_id) DO NOTHING
        RETURNING id`,
-      [
-        data.application_id, data.intern_id, data.company_id,
-        data.school_id || null, data.slot_id,
-        data.mentor_id || null, data.start_date, data.end_date,
-      ]
+      [data.application_id, data.start_date, data.end_date],
     );
+    if (!rows.length) {
+      throw new Error('Application is not accepted or already has a placement.');
+    }
     return rows[0];
   }
 
@@ -370,7 +423,7 @@ export class AdminService {
       SELECT
         u.id, u.name, u.email, a.department,
         COALESCE(a.max_capacity, 3) AS max_capacity,
-        (SELECT COUNT(*) FROM intern_profiles ip WHERE ip.mentor_name = u.name)::int AS assigned_count
+        (SELECT COUNT(*) FROM intern_profiles ip WHERE ip.mentor_id = u.id)::int AS assigned_count
       FROM admins a
       JOIN users u ON u.id = a.user_id
       WHERE a.is_mentor = true AND u.deleted_at IS NULL
@@ -397,7 +450,7 @@ export class AdminService {
       );
       if (existing.rows.length) throw new Error('Email already in use.');
 
-      const hashed = await bcrypt.hash(data.password, 10);
+      const hashed = await bcrypt.hash(data.password, 12);
 
       const { id: userId } = await createDualWriteUser(client, {
         email: data.email,
@@ -446,28 +499,44 @@ export class AdminService {
   }
 
   async resetMentorPassword(userId: number, newPassword: string) {
-    const pool   = getPool();
-    const hashed = await bcrypt.hash(newPassword, 10);
+    const pool = getPool();
+    const hashed = await bcrypt.hash(newPassword, 12);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `SELECT u.email, u.name FROM epdg.users u
+         JOIN epdg.admins a ON a.user_id = u.id
+         WHERE u.id = $1 AND a.is_mentor = TRUE AND u.deleted_at IS NULL`,
+        [userId],
+      );
+      if (!rows.length) throw new Error('Mentor not found.');
 
-    const { rows } = await pool.query(
-      `SELECT u.email, u.name FROM users u
-       JOIN admins a ON a.user_id = u.id
-       WHERE u.id = $1 AND a.is_mentor = TRUE AND u.deleted_at IS NULL`,
-      [userId]
-    );
-    if (!rows.length) throw new Error('Mentor not found.');
+      const coreUpdate = await client.query(
+        'UPDATE core.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashed, userId],
+      );
+      requireSingleRow(coreUpdate, 'Core mentor password reset');
+      const epdgUpdate = await client.query(
+        'UPDATE epdg.users SET password = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id',
+        [hashed, userId],
+      );
+      requireSingleRow(epdgUpdate, 'EPDG mentor password reset');
+      const adminUpdate = await client.query(
+        'UPDATE epdg.admins SET force_password_change = TRUE WHERE user_id = $1 RETURNING user_id',
+        [userId],
+      );
+      requireSingleRow(adminUpdate, 'Mentor force-password-change update');
+      await client.query('COMMIT');
 
-    await pool.query(
-      `UPDATE users SET password = $1 WHERE id = $2`,
-      [hashed, userId]
-    );
-    await pool.query(
-      `UPDATE admins SET force_password_change = TRUE WHERE user_id = $1`,
-      [userId]
-    );
-
-    this.sendMentorWelcomeEmail(rows[0].email, rows[0].name, newPassword, '(unchanged)');
-    return { email: rows[0].email, name: rows[0].name };
+      this.sendMentorWelcomeEmail(rows[0].email, rows[0].name, newPassword, '(unchanged)');
+      return { name: rows[0].name };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   // ─── Internship Slots ────────────────────────────────────────────────────────
@@ -902,7 +971,14 @@ export class AdminService {
 
   async deleteResource(id: number) {
     const pool = getPool();
-    await pool.query(`DELETE FROM resources WHERE id=$1`, [id]);
+    const { rowCount } = await pool.query(
+      `UPDATE resources
+       SET status='archived', updated_at=NOW()
+       WHERE id=$1
+       RETURNING id`,
+      [id],
+    );
+    if (rowCount !== 1) throw new Error('Resource not found.');
   }
 
   // ─── Feedback ────────────────────────────────────────────────────────────────
@@ -1022,107 +1098,196 @@ export class AdminService {
     }
   }
 
-  private async approve(client: any, user: any, adminId: number, payload: any) {
+  private async approve(
+    client: PoolClient,
+    user: { id: number; role: string },
+    adminId: number,
+    payload: { department?: string; mentor_id?: number },
+  ) {
     const now = new Date();
+    let mentorName: string | undefined;
 
     // When admin approves any user, also mark their email as verified
-    await client.query(
-      'UPDATE users SET is_verified=true, verification_token=NULL, token_expires_at=NULL WHERE id=$1',
+    const epdgUserUpdate = await client.query(
+      `UPDATE epdg.users
+       SET is_verified=true, verification_token=NULL, token_expires_at=NULL, rejection_reason=NULL
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING id`,
       [user.id]
     );
+    requireSingleRow(epdgUserUpdate, 'EPDG user approval');
+    const coreUserUpdate = await client.query(
+      `UPDATE core.users
+       SET is_verified=true, verification_token=NULL, token_expires_at=NULL
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING id`,
+      [user.id]
+    );
+    requireSingleRow(coreUserUpdate, 'Core user approval');
+    const branchRoleUpdate = await client.query(
+      `UPDATE core.user_branch_roles ubr
+       SET rejection_reason=NULL
+       FROM core.branches b
+       WHERE ubr.branch_id=b.id AND b.code='epdg' AND ubr.user_id=$1
+       RETURNING ubr.user_id`,
+      [user.id]
+    );
+    requireSingleRow(branchRoleUpdate, 'Core branch-role approval');
 
     if (user.role === 'company') {
-      await client.query(
-        `UPDATE companies SET is_approved=true, approved_by=$1, approved_at=$2
-         WHERE user_id=$3`,
+      const result = await client.query(
+        `UPDATE epdg.companies SET is_approved=true, approved_by=$1, approved_at=$2
+         WHERE user_id=$3 AND deleted_at IS NULL
+         RETURNING user_id`,
         [adminId, now, user.id]
       );
-      await client.query(
-        'UPDATE users SET rejection_reason=NULL WHERE id=$1',
-        [user.id]
-      );
+      requireSingleRow(result, 'Company approval');
     } else if (user.role === 'school') {
-      await client.query(
-        `UPDATE schools SET is_approved=true, approved_by=$1, approved_at=$2
-         WHERE user_id=$3`,
+      const result = await client.query(
+        `UPDATE epdg.schools SET is_approved=true, approved_by=$1, approved_at=$2
+         WHERE user_id=$3 AND deleted_at IS NULL
+         RETURNING user_id`,
         [adminId, now, user.id]
       );
-      await client.query(
-        'UPDATE users SET rejection_reason=NULL WHERE id=$1',
-        [user.id]
-      );
+      requireSingleRow(result, 'School approval');
     } else if (user.role === 'intern') {
-      const fields = ['is_approved=$1', 'approved_by=$2', 'approved_at=$3', 'rejection_reason=$4', 'onboarding_status=$5'];
-      const values: unknown[] = [true, adminId, now, null, 'pending_onboarding'];
-
-      if (payload.department) { fields.push(`department=$${values.length + 1}`); values.push(payload.department); }
-      if (payload.mentor)     { fields.push(`mentor_name=$${values.length + 1}`); values.push(payload.mentor); }
-
-      values.push(user.id);
-      await client.query(
-        `UPDATE intern_profiles SET ${fields.join(', ')} WHERE user_id=$${values.length}`,
-        values
+      if (
+        !payload.department?.trim() ||
+        !Number.isInteger(payload.mentor_id) ||
+        Number(payload.mentor_id) < 1
+      ) {
+        throw new Error('Intern approval requires a department and active mentor ID');
+      }
+      const mentorResult = await client.query(
+        `SELECT u.id, u.name
+         FROM epdg.admins a
+         JOIN epdg.users u ON u.id = a.user_id
+         WHERE u.id = $1 AND a.is_mentor = TRUE AND u.deleted_at IS NULL
+         FOR SHARE`,
+        [payload.mentor_id],
       );
-      await client.query(
-        'UPDATE users SET rejection_reason=NULL WHERE id=$1',
-        [user.id]
+      if (mentorResult.rowCount !== 1) {
+        throw new Error('Selected mentor is not active');
+      }
+      mentorName = mentorResult.rows[0].name;
+      const result = await client.query(
+        `UPDATE epdg.intern_profiles
+         SET is_approved=$1,
+             approved_by=$2,
+             approved_at=$3,
+             rejection_reason=$4,
+             onboarding_status=$5,
+             department=$6,
+             mentor_id=$7,
+             mentor_name=$8
+         WHERE user_id=$9
+         RETURNING user_id`,
+        [
+          true,
+          adminId,
+          now,
+          null,
+          'pending_onboarding',
+          payload.department.trim(),
+          Number(payload.mentor_id),
+          mentorName,
+          user.id,
+        ],
       );
+      requireSingleRow(result, 'Intern approval');
     } else if (user.role === 'admin') {
-      await client.query(
-        'UPDATE admins SET updated_at=NOW() WHERE user_id=$1',
+      const result = await client.query(
+        'UPDATE epdg.admins SET updated_at=NOW() WHERE user_id=$1 RETURNING user_id',
         [user.id]
       );
+      requireSingleRow(result, 'Admin approval');
+    } else {
+      throw new Error('Unsupported user role');
     }
+    return { mentorName };
   }
 
-  private async reject(client: any, user: any, reason: string) {
-    await client.query(
-      'UPDATE users SET rejection_reason=$1 WHERE id=$2',
+  private async reject(
+    client: PoolClient,
+    user: { id: number; role: string },
+    reason: string,
+  ) {
+    const epdgUserUpdate = await client.query(
+      `UPDATE epdg.users SET rejection_reason=$1
+       WHERE id=$2 AND deleted_at IS NULL
+       RETURNING id`,
       [reason, user.id]
     );
+    requireSingleRow(epdgUserUpdate, 'EPDG user rejection');
+    const branchRoleUpdate = await client.query(
+      `UPDATE core.user_branch_roles ubr
+       SET rejection_reason=$1
+       FROM core.branches b
+       WHERE ubr.branch_id=b.id AND b.code='epdg' AND ubr.user_id=$2
+       RETURNING ubr.user_id`,
+      [reason, user.id]
+    );
+    requireSingleRow(branchRoleUpdate, 'Core branch-role rejection');
 
     if (user.role === 'company') {
-      await client.query(
-        'UPDATE companies SET is_approved=false WHERE user_id=$1',
+      const result = await client.query(
+        `UPDATE epdg.companies SET is_approved=false
+         WHERE user_id=$1 AND deleted_at IS NULL
+         RETURNING user_id`,
         [user.id]
       );
+      requireSingleRow(result, 'Company rejection');
     } else if (user.role === 'school') {
-      await client.query(
-        'UPDATE schools SET is_approved=false WHERE user_id=$1',
+      const result = await client.query(
+        `UPDATE epdg.schools SET is_approved=false
+         WHERE user_id=$1 AND deleted_at IS NULL
+         RETURNING user_id`,
         [user.id]
       );
+      requireSingleRow(result, 'School rejection');
     } else if (user.role === 'intern') {
-      await client.query(
-        'UPDATE intern_profiles SET is_approved=false, rejection_reason=$1 WHERE user_id=$2',
+      const result = await client.query(
+        `UPDATE epdg.intern_profiles
+         SET is_approved=false, rejection_reason=$1
+         WHERE user_id=$2
+         RETURNING user_id`,
         [reason, user.id]
       );
+      requireSingleRow(result, 'Intern rejection');
+    } else if (user.role === 'admin') {
+      throw new Error('Administrator accounts cannot be rejected through this workflow');
+    } else {
+      throw new Error('Unsupported user role');
     }
   }
 
   // ─── Email helpers ───────────────────────────────────────────────────────────
 
   private sendApprovalEmail(to: string, name: string, role: string, department?: string, mentor?: string) {
-    const onboardingUrl = `${FRONTEND()}/dashboard/onboarding`;
+    const dashboardUrl = `${FRONTEND()}/dashboard`;
     const isIntern = role === 'intern';
+    const safeName = escapeHtml(name);
+    const safeRole = escapeHtml(role);
+    const safeDepartment = department ? escapeHtml(department) : '';
+    const safeMentor = mentor ? escapeHtml(mentor) : '';
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Congratulations <strong>${name}</strong>! Your application as a <strong>${role}</strong>
+        Congratulations <strong>${safeName}</strong>! Your application as a <strong>${safeRole}</strong>
         on the Emerson Professional Development platform has been <strong style="color:#16a34a;">approved</strong>.
       </p>
-      ${department ? `<p style="font-size:14px;color:#555;">📌 Department: <strong>${department}</strong></p>` : ''}
-      ${mentor     ? `<p style="font-size:14px;color:#555;">👤 Assigned Mentor: <strong>${mentor}</strong></p>` : ''}
+      ${safeDepartment ? `<p style="font-size:14px;color:#555;">📌 Department: <strong>${safeDepartment}</strong></p>` : ''}
+      ${safeMentor ? `<p style="font-size:14px;color:#555;">👤 Assigned Mentor: <strong>${safeMentor}</strong></p>` : ''}
       ${isIntern
         ? `<p style="font-size:14px;color:#555;line-height:1.6;">
-             You can now log in and complete your onboarding. The process takes just a few minutes —
-             sign the required agreements, choose your track, and submit your discovery statement to
-             get started.
+             You can now access your dashboard. Onboarding steps that depend on legal agreement
+             content remain unavailable until the approved document and evidence workflow is configured.
            </p>`
         : `<p style="font-size:14px;color:#555;">You can now log in and access your dashboard.</p>`
       }
       <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
         <tr><td style="background:#4B1E91;border-radius:8px;">
-          <a href="${onboardingUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
-            ${isIntern ? 'Start Onboarding →' : 'Go to Dashboard →'}
+          <a href="${dashboardUrl}" style="display:inline-block;padding:13px 30px;color:#fff;text-decoration:none;font-size:15px;font-weight:bold;">
+            Go to Dashboard →
           </a>
         </td></tr>
       </table>
@@ -1134,19 +1299,21 @@ export class AdminService {
   }
 
   private sendRejectionEmail(to: string, name: string, reason: string) {
+    const safeName = escapeHtml(name);
+    const safeReason = escapeHtml(reason);
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Hi <strong>${name}</strong>, thank you for applying to the Emerson Professional Development platform.
+        Hi <strong>${safeName}</strong>, thank you for applying to the Emerson Professional Development platform.
       </p>
       <p style="font-size:15px;color:#555;line-height:1.6;">
         After review, your application was <strong style="color:#dc2626;">not approved</strong> at this time.
       </p>
-      ${reason ? `
+      ${safeReason ? `
       <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:4px;margin:20px 0;">
-        <p style="margin:0;font-size:14px;color:#7f1d1d;"><strong>Reason:</strong> ${reason}</p>
+        <p style="margin:0;font-size:14px;color:#7f1d1d;"><strong>Reason:</strong> ${safeReason}</p>
       </div>` : ''}
-      <p style="font-size:14px;color:#555;">If you believe this is in error, please contact
-        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+      <p style="font-size:14px;color:#555;">
+        If you believe this is in error, contact program leadership through the approved internal support channel.
       </p>
     `;
     this.sendMail(to, 'Application Update — Emerson Professional', body).catch((e) =>
@@ -1162,22 +1329,25 @@ export class AdminService {
     };
     const roleLabel = ROLE_LABELS[role] || role;
     const loginUrl  = `${FRONTEND()}/login`;
+    const safeName = escapeHtml(name);
+    const safeTo = escapeHtml(to);
+    const safePassword = escapeHtml(password);
+    const safeRoleLabel = escapeHtml(roleLabel);
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Hi <strong>${name}</strong>, an account has been created for you on the
-        Emerson Professional Development platform as a <strong>${roleLabel}</strong>.
+        Hi <strong>${safeName}</strong>, an account has been created for you on the
+        Emerson Professional Development platform as a <strong>${safeRoleLabel}</strong>.
       </p>
       <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
         <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${safeTo}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${safePassword}</strong></p>
       </div>
       <p style="font-size:14px;color:#dc2626;font-weight:bold;">
         ⚠️ Please change your password after your first login.
       </p>
       <p style="font-size:14px;color:#555;">
-        If you did not expect this email, please contact
-        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+        If you did not expect this email, contact program leadership through the approved internal support channel.
       </p>
       <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
         <tr><td style="background:#4B1E91;border-radius:8px;">
@@ -1187,7 +1357,7 @@ export class AdminService {
         </td></tr>
       </table>
     `;
-    this.sendMail(to, `👋 Welcome to Emerson — Your ${roleLabel} Account is Ready`, body).catch((e) =>
+    this.sendMail(to, `👋 Welcome to Emerson — Your ${safeRoleLabel} Account is Ready`, body).catch((e) =>
       logger.error('user welcome email failed', e)
     );
   }
@@ -1204,24 +1374,28 @@ export class AdminService {
     };
     const title    = TITLES[adminType] || 'Admin';
     const loginUrl = `${FRONTEND()}/login`;
+    const safeName = escapeHtml(name);
+    const safeTo = escapeHtml(to);
+    const safePassword = escapeHtml(password);
+    const safeTitle = escapeHtml(title);
+    const safeDepartment = department ? escapeHtml(department) : '';
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Hi <strong>${name}</strong>, an admin account has been created for you on the
+        Hi <strong>${safeName}</strong>, an admin account has been created for you on the
         Emerson Professional Development platform.
       </p>
       <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
         <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🏷️ Role: <strong>${title}</strong></p>
-        ${department ? `<p style="margin:4px 0 0;font-size:13px;color:#6b7280;">Department: ${department}</p>` : ''}
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${safeTo}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${safePassword}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🏷️ Role: <strong>${safeTitle}</strong></p>
+        ${safeDepartment ? `<p style="margin:4px 0 0;font-size:13px;color:#6b7280;">Department: ${safeDepartment}</p>` : ''}
       </div>
       <p style="font-size:14px;color:#dc2626;font-weight:bold;">
         ⚠️ You will be asked to set a new password on your first login.
       </p>
       <p style="font-size:14px;color:#555;">
-        If you did not expect this email, please contact
-        <a href="mailto:support@theemersonempire.info" style="color:#4B1E91;">support@theemersonempire.info</a>.
+        If you did not expect this email, contact program leadership through the approved internal support channel.
       </p>
       <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
         <tr><td style="background:#4B1E91;border-radius:8px;">
@@ -1231,23 +1405,27 @@ export class AdminService {
         </td></tr>
       </table>
     `;
-    this.sendMail(to, `👋 Welcome to Emerson — Your ${title} Account is Ready`, body).catch((e) =>
+    this.sendMail(to, `👋 Welcome to Emerson — Your ${safeTitle} Account is Ready`, body).catch((e) =>
       logger.error('admin welcome email failed', e)
     );
   }
 
   private sendMentorWelcomeEmail(to: string, name: string, password: string, department: string) {
     const loginUrl = `${FRONTEND()}/login`;
+    const safeName = escapeHtml(name);
+    const safeTo = escapeHtml(to);
+    const safePassword = escapeHtml(password);
+    const safeDepartment = escapeHtml(department);
     const body = `
       <p style="font-size:15px;color:#555;line-height:1.6;">
-        Hi <strong>${name}</strong>, a mentor account has been created for you on the
+        Hi <strong>${safeName}</strong>, a mentor account has been created for you on the
         Emerson Professional Development platform.
       </p>
       <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:20px;margin:24px 0;">
         <p style="margin:0 0 8px;font-size:14px;color:#4B1E91;font-weight:bold;">Your login credentials</p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${to}</strong></p>
-        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${password}</strong></p>
-        <p style="margin:12px 0 0;font-size:13px;color:#6b7280;">Department: ${department}</p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">📧 Email: <strong>${safeTo}</strong></p>
+        <p style="margin:0 0 4px;font-size:14px;color:#374151;">🔑 Temporary Password: <strong style="font-family:monospace;font-size:15px;">${safePassword}</strong></p>
+        <p style="margin:12px 0 0;font-size:13px;color:#6b7280;">Department: ${safeDepartment}</p>
       </div>
       <p style="font-size:14px;color:#dc2626;font-weight:bold;">
         ⚠️ You will be asked to set a new password on your first login.
@@ -1280,7 +1458,7 @@ export class AdminService {
                 <hr style="border:none;border-top:1px solid #eee;margin:32px 0;">
                 <p style="color:#aaa;font-size:12px;margin:0;">
                   © Emerson Professional Development Group ·
-                  <a href="mailto:support@theemersonempire.info" style="color:#aaa;">support@theemersonempire.info</a>
+                  Emerson Professional Development Group
                 </p>
               </td></tr>
             </table>
@@ -1288,8 +1466,13 @@ export class AdminService {
         </table>
       </body></html>
     `;
-    const { error } = await getResend().emails.send({ from: FROM(), to, subject, html });
-    if (error) logger.error(`Resend error [${subject}]: ${JSON.stringify(error)}`);
+    const { error } = await getResend().emails.send({
+      from: FROM(),
+      to,
+      subject: sanitizeEmailSubject(subject),
+      html,
+    });
+    if (error) logger.error('Administrative email delivery failed');
   }
 
   private normalise(r: any) {
@@ -1297,14 +1480,18 @@ export class AdminService {
     let status: string;
     if (!r.is_verified) {
       status = 'unverified';
+    } else if (r.rejection_reason || r.intern_rejection) {
+      status = 'rejected';
     } else if (r.role === 'company') {
-      status = r.company_approved ? 'approved' : (r.rejection_reason ? 'rejected' : 'pending');
+      status = r.company_approved ? 'approved' : 'pending';
     } else if (r.role === 'school') {
-      status = r.school_approved  ? 'approved' : (r.rejection_reason ? 'rejected' : 'pending');
+      status = r.school_approved  ? 'approved' : 'pending';
     } else if (r.role === 'intern') {
-      status = r.intern_approved  ? 'approved' : (r.rejection_reason || r.intern_rejection ? 'rejected' : 'pending');
+      status = r.intern_approved  ? 'approved' : 'pending';
+    } else if (r.role === 'admin') {
+      status = r.admin_profile_id ? 'approved' : 'pending';
     } else {
-      status = 'approved'; // admin is always approved
+      status = 'pending';
     }
 
     return {
@@ -1318,15 +1505,17 @@ export class AdminService {
       last_login_at:        r.last_login_at,
       rejection_reason:     r.rejection_reason || r.intern_rejection || null,
       // role-specific
-      phone:                r.intern_phone      || null,
+      phone:                r.intern_phone      || r.school_phone || null,
       cover_letter:         r.cover_letter      || null,
       cv_url:               r.cv_url            || null,
       course:               r.course            || null,
       department:           r.intern_department || null,
       mentor:               r.mentor_name       || null,
+      mentor_id:            r.mentor_id         || null,
       industry:             r.industry         || null,
       contact_person:       r.company_contact  || r.school_contact  || null,
       country:              r.country          || null,
+      city:                 r.school_city      || null,
       county:               r.county           || r.school_city     || null,
       website:              r.company_website  || r.school_website  || null,
       number_of_employees:  r.number_of_employees || null,

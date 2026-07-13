@@ -48,7 +48,7 @@ export const uploadCV = async (req: Request, res: Response) => {
     if (signErr || !signedData?.signedUrl) throw signErr ?? new Error('Failed to generate signed URL');
 
     res.json({ success: true, url: signedData.signedUrl, path: filePath });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message || 'File upload failed.' });
+  } catch {
+    res.status(500).json({ success: false, message: 'File upload failed.' });
   }
 };

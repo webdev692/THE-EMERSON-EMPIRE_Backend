@@ -65,7 +65,7 @@ router.get('/users', AdminController.getUsers);
  *     security:
  *       - bearerAuth: []
  */
-router.post('/users', AdminController.createUser);
+router.post('/users', superAdminGuard, AdminController.createUser);
 
 /**
  * @swagger
@@ -95,8 +95,8 @@ router.post('/users', AdminController.createUser);
  *                 type: string
  *               department:
  *                 type: string
- *               mentor:
- *                 type: string
+   *               mentor_id:
+   *                 type: integer
  */
 router.patch('/users/:id', AdminController.updateUser);
 
@@ -117,8 +117,8 @@ router.get('/users/:id/cv-analysis', AdminController.getCvAnalysis);
 
 // Mentors — admins with is_mentor = true
 router.get('/mentors',                          AdminController.getMentors);
-router.post('/mentors',                         AdminController.createMentor);
-router.patch('/mentors/:id/reset-password',     AdminController.resetMentorPassword);
+router.post('/mentors', superAdminGuard,        AdminController.createMentor);
+router.patch('/mentors/:id/reset-password', superAdminGuard, AdminController.resetMentorPassword);
 router.delete('/mentors/:id', superAdminGuard,  AdminController.deactivateMentor);
 
 // Internship slots — admin CRUD
@@ -132,7 +132,13 @@ router.get('/applications', ApplicationController.getAllApplications);
 
 // Certificates
 router.get('/certificates',                   CertificateController.list);
-router.post('/certificates',                  CertificateController.issue);
+router.post('/certificates',                  (_req, res) => {
+  res.status(503).json({
+    success: false,
+    message: 'Certificate issuance is temporarily unavailable.',
+    errors: [],
+  });
+});
 router.patch('/certificates/:id/revoke', superAdminGuard, CertificateController.revoke);
 router.get('/certificate-templates',          CertificateController.listTemplates);
 

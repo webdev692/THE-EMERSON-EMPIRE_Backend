@@ -38,6 +38,18 @@ export const getProfile = async (req: Request, res: Response) => {
 // PATCH /api/intern/profile
 export const updateProfile = async (req: Request, res: Response) => {
   try {
+    const workflowControlledFields = ['track', 'cv_url', 'nda_signed', 'disclaimer_accepted'];
+    const forbidden = workflowControlledFields.filter((field) =>
+      Object.prototype.hasOwnProperty.call(req.body, field),
+    );
+    if (forbidden.length > 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Workflow-controlled profile fields cannot be changed through this endpoint.',
+        errors: [],
+      });
+      return;
+    }
     const userId = (req as AuthRequest).user.id;
     const data   = await internService.updateProfile(userId, req.body);
     res.json({ success: true, data });
@@ -272,12 +284,25 @@ export const getBadges = async (req: Request, res: Response) => {
 export const submitFeedback = async (req: Request, res: Response) => {
   try {
     const userId = (req as AuthRequest).user.id;
-    const { type, rating, comment, name } = req.body;
+    const { type, rating, comment } = req.body;
     if (!type || !comment) {
       res.status(400).json({ success: false, message: 'type and comment are required', errors: [] });
       return;
     }
-    const data = await internService.submitFeedback(userId, { type, rating: Number(rating) || 5, comment, name: name || 'Intern' });
+    if (!['programme', 'mentor', 'suggestion'].includes(type)) {
+      res.status(400).json({ success: false, message: 'Invalid feedback type', errors: [] });
+      return;
+    }
+    const numericRating = Number(rating) || 5;
+    if (!Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
+      res.status(400).json({ success: false, message: 'rating must be between 1 and 5', errors: [] });
+      return;
+    }
+    const data = await internService.submitFeedback(userId, {
+      type,
+      rating: numericRating,
+      comment,
+    });
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message, errors: [] });
@@ -477,8 +502,8 @@ export const uploadSubmissionFile = async (req: Request, res: Response) => {
       name:    originalname,
       sizeKb:  Math.ceil(buffer.length / 1024),
     });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message || 'Upload failed.' });
+  } catch {
+    res.status(500).json({ success: false, message: 'Upload failed.' });
   }
 };
 

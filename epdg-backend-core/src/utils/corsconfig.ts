@@ -1,29 +1,34 @@
-import { CorsOptions } from "cors";
+import { CorsOptions } from 'cors';
 
-// Add origins via CORS_ORIGINS env var (comma-separated) or use defaults
-const extraOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
-  : [];
+const developmentOrigins = ['http://localhost:5173', 'http://localhost:5174'];
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "https://epdg.netlify.app",
-  "https://emersonproffesionaldevelopment.netlify.app",
-  ...extraOrigins,
-];
+export function getAllowedOrigins(env: NodeJS.ProcessEnv = process.env): string[] {
+  const configured = (env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (env.NODE_ENV === 'production') {
+    return [...new Set(configured)];
+  }
+
+  return [...new Set([...developmentOrigins, ...configured])];
+}
+
+const allowedOrigins = getAllowedOrigins();
 
 export const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (curl, Postman, mobile apps)
+    // Server-to-server clients do not send an Origin header.
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.includes(origin)) return callback(null, true);
 
-    return callback(new Error(`CORS: origin ${origin} not allowed`));
+    const error = new Error('Origin is not allowed');
+    Object.assign(error, { statusCode: 403 });
+    return callback(error);
   },
-  methods:        ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials:    true,
-  maxAge:         600,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  maxAge: 600,
 };

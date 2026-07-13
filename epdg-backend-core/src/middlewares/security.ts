@@ -15,3 +15,11 @@ export const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+export const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { success: false, message: 'Too many upload attempts, please try again later.', errors: [] },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

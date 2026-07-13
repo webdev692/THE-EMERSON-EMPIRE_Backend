@@ -21,7 +21,11 @@ export class CareerFileService {
   private async getProfileId(userId: number): Promise<number> {
     const pool = getPool();
     const { rows } = await pool.query(
-      `SELECT id FROM intern_profiles WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
+      `SELECT ip.id
+       FROM intern_profiles ip
+       JOIN users u ON u.id = ip.user_id
+       WHERE ip.user_id = $1 AND u.deleted_at IS NULL
+       LIMIT 1`,
       [userId],
     );
     if (!rows[0]) throw new Error('Intern profile not found');
@@ -343,8 +347,8 @@ export class CareerFileService {
 
     const { rows: check } = await pool.query(
       `SELECT ip.id FROM intern_profiles ip
-       JOIN users u ON u.name = ip.mentor_name
-       WHERE ip.id = $1 AND u.id = $2 AND ip.deleted_at IS NULL`,
+       JOIN users u ON u.id = ip.mentor_id
+       WHERE ip.id = $1 AND ip.mentor_id = $2 AND u.deleted_at IS NULL`,
       [internProfileId, mentorUserId],
     );
     if (!check[0]) throw new Error('Not authorized to endorse this intern');
@@ -438,8 +442,8 @@ export class CareerFileService {
       `SELECT cf.id, cf.readiness_tier, cf.readiness_score
        FROM career_files cf
        JOIN intern_profiles ip ON ip.id = cf.intern_profile_id
-       JOIN users u ON u.name = ip.mentor_name
-       WHERE ip.id = $1 AND u.id = $2 AND ip.deleted_at IS NULL`,
+       JOIN users u ON u.id = ip.mentor_id
+       WHERE ip.id = $1 AND ip.mentor_id = $2 AND u.deleted_at IS NULL`,
       [internProfileId, mentorUserId],
     );
     if (!cfRows[0]) throw new Error('Not authorized');
@@ -467,8 +471,8 @@ export class CareerFileService {
 
     const { rows: check } = await pool.query(
       `SELECT ip.id FROM intern_profiles ip
-       JOIN users u ON u.name = ip.mentor_name
-       WHERE ip.id = $1 AND u.id = $2 AND ip.deleted_at IS NULL`,
+       JOIN users u ON u.id = ip.mentor_id
+       WHERE ip.id = $1 AND ip.mentor_id = $2 AND u.deleted_at IS NULL`,
       [internProfileId, mentorUserId],
     );
     if (!check[0]) throw new Error('Not authorized');
@@ -497,12 +501,15 @@ export class CareerFileService {
   async getPublicPassport(slug: string) {
     const pool = getPool();
     const { rows: cfRows } = await pool.query(
-      `SELECT cf.*, u.name, u.email, ip.track, ip.department, ip.course,
+      `SELECT cf.*, u.name, ip.track, ip.department, ip.course,
               ip.github_url, ip.linkedin_url, ip.portfolio_url
        FROM career_files cf
        JOIN intern_profiles ip ON ip.id = cf.intern_profile_id
        JOIN users u ON u.id = ip.user_id
-       WHERE cf.slug = $1 AND cf.is_public = TRUE AND ip.deleted_at IS NULL`,
+       WHERE cf.slug = $1
+         AND cf.is_public = TRUE
+         AND ip.is_approved = TRUE
+         AND u.deleted_at IS NULL`,
       [slug],
     );
     if (!cfRows[0]) return null;
@@ -530,7 +537,6 @@ export class CareerFileService {
 
     return {
       name:                cf.name,
-      email:               cf.email,
       track:               cf.track,
       department:          cf.department,
       course:              cf.course,
@@ -566,7 +572,9 @@ export class CareerFileService {
       FROM career_files cf
       JOIN intern_profiles ip ON ip.id = cf.intern_profile_id
       JOIN users u ON u.id = ip.user_id
-      WHERE cf.is_public = TRUE AND ip.deleted_at IS NULL
+      WHERE cf.is_public = TRUE
+        AND ip.is_approved = TRUE
+        AND u.deleted_at IS NULL
     `;
 
     if (filters.track) {
@@ -631,7 +639,7 @@ export class CareerFileService {
         FROM career_files cf
         JOIN intern_profiles ip ON ip.id = cf.intern_profile_id
         JOIN users u ON u.id = ip.user_id
-        WHERE ip.deleted_at IS NULL
+        WHERE u.deleted_at IS NULL
         ORDER BY cf.readiness_score DESC LIMIT 10
       `),
       pool.query(`

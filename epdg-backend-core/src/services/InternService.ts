@@ -73,11 +73,6 @@ export class InternService {
 
   // ─── Onboarding flow (new) ─────────────────────────────────────────────────
 
-  // Mentor first-name pools keyed by track category
-  private static readonly FRONTEND_POOL = ['Wiltord', 'Jonathan', 'Hosea', 'Khoe'];
-  private static readonly BACKEND_POOL  = ['Malik', 'Matheus', 'Joshua'];
-  private static readonly FRONTEND_TRACKS = ['web design', 'social media'];
-
   async getOnboardingStatus(userId: number) {
     const pool = getPool();
     const { rows } = await pool.query(
@@ -159,60 +154,21 @@ export class InternService {
     const pool   = getPool();
     const client = await pool.connect();
 
-    const poolNames = InternService.FRONTEND_TRACKS.includes(track.toLowerCase())
-      ? InternService.FRONTEND_POOL
-      : InternService.BACKEND_POOL;
-
     try {
       await client.query('BEGIN');
 
-      // Find least-loaded mentor from the track pool
-      const { rows: poolRows } = await client.query(
-        `SELECT u.id, u.name, a.max_capacity,
-                COUNT(ip2.mentor_id)::int AS assigned_count
-         FROM users u
-         JOIN admins a ON a.user_id = u.id
-         LEFT JOIN intern_profiles ip2 ON ip2.mentor_id = u.id
-         WHERE a.admin_type = 'mentor'
-           AND split_part(u.name, ' ', 1) = ANY($1::text[])
-           AND u.deleted_at IS NULL
-         GROUP BY u.id, u.name, a.max_capacity
-         HAVING COUNT(ip2.mentor_id) < a.max_capacity
-         ORDER BY (a.max_capacity - COUNT(ip2.mentor_id)) DESC
-         LIMIT 1`,
-        [poolNames],
-      );
-
-      let mentorRow = poolRows[0];
-
-      // Fall back to any available mentor if pool is full
-      if (!mentorRow) {
-        const { rows: fallback } = await client.query(
-          `SELECT u.id, u.name, a.max_capacity,
-                  COUNT(ip2.mentor_id)::int AS assigned_count
-           FROM users u
-           JOIN admins a ON a.user_id = u.id
-           LEFT JOIN intern_profiles ip2 ON ip2.mentor_id = u.id
-           WHERE a.admin_type = 'mentor' AND u.deleted_at IS NULL
-           GROUP BY u.id, u.name, a.max_capacity
-           HAVING COUNT(ip2.mentor_id) < a.max_capacity
-           ORDER BY (a.max_capacity - COUNT(ip2.mentor_id)) DESC
-           LIMIT 1`,
-          [],
-        );
-        mentorRow = fallback[0];
-      }
-
-      const mentorId   = mentorRow?.id   ?? null;
-      const mentorName = mentorRow?.name ?? null;
-
-      await client.query(
+      const trackUpdate = await client.query(
         `UPDATE intern_profiles
-         SET track=$1, track_confirmed_at=NOW(), mentor_id=$2, mentor_name=$3,
-             onboarding_status='active_onboarding'
-         WHERE user_id=$4 AND onboarding_status='track_pending'`,
-        [track, mentorId, mentorName, userId],
+         SET track=$1, track_confirmed_at=NOW(), onboarding_status='active_onboarding'
+         WHERE user_id=$2
+           AND onboarding_status='track_pending'
+           AND mentor_id IS NOT NULL
+         RETURNING user_id`,
+        [track, userId],
       );
+      if (trackUpdate.rowCount !== 1) {
+        throw new Error('Track confirmation requires an existing mentor assignment');
+      }
 
       await client.query('COMMIT');
       return this.getOnboardingStatus(userId);
@@ -282,15 +238,11 @@ export class InternService {
     year_of_study?: number;
     contact_phone?: string;
     skills?:       string[];
-    track?:        string;
-    cv_url?:       string;
     linkedin_url?: string;
     github_url?:   string;
     portfolio_url?: string;
     country?:      string;
     city?:         string;
-    nda_signed?:   boolean;
-    disclaimer_accepted?: boolean;
   }) {
     const pool   = getPool();
     const client = await pool.connect();
@@ -299,10 +251,21 @@ export class InternService {
       await client.query('BEGIN');
 
       if (data.name) {
-        await client.query(
-          'UPDATE users SET name = $1 WHERE id = $2',
-          [data.name, userId]
+        const coreUpdate = await client.query(
+          `UPDATE core.users SET name = $1
+           WHERE id = $2 AND deleted_at IS NULL
+           RETURNING id`,
+          [data.name.trim(), userId]
         );
+        const epdgUpdate = await client.query(
+          `UPDATE epdg.users SET name = $1
+           WHERE id = $2 AND deleted_at IS NULL
+           RETURNING id`,
+          [data.name.trim(), userId]
+        );
+        if (coreUpdate.rowCount !== 1 || epdgUpdate.rowCount !== 1) {
+          throw new Error('Identity synchronization failed');
+        }
       }
 
       const profileFields: string[] = [];
@@ -315,15 +278,11 @@ export class InternService {
         year_of_study:        data.year_of_study,
         contact_phone:        data.contact_phone,
         skills:               data.skills ? JSON.stringify(data.skills) : undefined,
-        track:                data.track,
-        cv_url:               data.cv_url,
         linkedin_url:         data.linkedin_url,
         github_url:           data.github_url,
         portfolio_url:        data.portfolio_url,
         country:              data.country,
         city:                 data.city,
-        nda_signed:           data.nda_signed,
-        disclaimer_accepted:  data.disclaimer_accepted,
       };
 
       for (const [key, val] of Object.entries(map)) {
@@ -335,10 +294,14 @@ export class InternService {
 
       if (profileFields.length) {
         profileValues.push(userId);
-        await client.query(
-          `UPDATE intern_profiles SET ${profileFields.join(', ')} WHERE user_id = $${idx}`,
+        const profileUpdate = await client.query(
+          `UPDATE epdg.intern_profiles
+           SET ${profileFields.join(', ')}
+           WHERE user_id = $${idx}
+           RETURNING user_id`,
           profileValues
         );
+        if (profileUpdate.rowCount !== 1) throw new Error('Profile not found');
       }
 
       await client.query('COMMIT');
@@ -641,22 +604,30 @@ export class InternService {
     type:    'programme' | 'mentor' | 'suggestion';
     rating:  number;
     comment: string;
-    name:    string;
   }) {
     const pool = getPool();
     const isAnonymous = data.type === 'suggestion';
     const { rows: [fb] } = await pool.query(
       `INSERT INTO feedback (from_name, role, category, comment, rating, user_id)
-       VALUES ($1, 'intern', $2, $3, $4, $5)
+       SELECT
+         CASE WHEN $1::boolean THEN 'Anonymous' ELSE u.name END,
+         'intern',
+         $2,
+         $3,
+         $4,
+         CASE WHEN $1::boolean THEN NULL ELSE u.id END
+       FROM epdg.users u
+       WHERE u.id = $5 AND u.deleted_at IS NULL
        RETURNING id`,
       [
-        isAnonymous ? 'Anonymous' : data.name,
+        isAnonymous,
         data.type,
         data.comment,
         data.rating,
-        isAnonymous ? null : userId,
+        userId,
       ],
     );
+    if (!fb) throw new Error('User not found');
     return fb;
   }
 
@@ -691,9 +662,8 @@ export class InternService {
        FROM users u
        JOIN admins a ON a.user_id = u.id
        LEFT JOIN intern_profiles ip
-         ON ip.mentor_name = u.name
+         ON ip.mentor_id = u.id
          AND ip.is_approved = true
-         AND ip.deleted_at IS NULL
        WHERE a.admin_type = 'mentor'
          AND u.deleted_at IS NULL
        GROUP BY u.id, u.name, u.email, a.max_capacity
@@ -760,12 +730,11 @@ export class InternService {
               NULL::text[] AS mentor_skills,
               p.id         AS placement_id
        FROM intern_profiles ip
-       JOIN users u  ON u.name = ip.mentor_name AND u.deleted_at IS NULL
+       JOIN users u  ON u.id = ip.mentor_id AND u.deleted_at IS NULL
        JOIN admins a ON a.user_id = u.id
        LEFT JOIN placements p ON p.intern_id = ip.id AND p.status = 'active'
        WHERE ip.user_id = $1
-         AND ip.mentor_name IS NOT NULL
-         AND ip.deleted_at IS NULL
+         AND ip.mentor_id IS NOT NULL
        LIMIT 1`,
       [userId],
     );

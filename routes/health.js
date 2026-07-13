@@ -6,12 +6,11 @@ const router = express.Router();
 router.get('/', async (_req, res) => {
   const database = await checkDatabase();
 
-  res.status(database.ok || !database.configured ? 200 : 503).json({
-    success: database.ok || !database.configured,
+  res.status(database.ok ? 200 : 503).json({
+    success: database.ok,
     service: 'the-emerson-empire-backend',
-    status: database.ok ? 'ok' : database.configured ? 'degraded' : 'configured_without_database',
+    status: database.ok ? 'ok' : 'unavailable',
     database,
-    timestamp: new Date().toISOString(),
   });
 });
 

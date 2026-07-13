@@ -1,6 +1,6 @@
 # API Endpoints
 
-This file documents the MVP backend routes for The Emerson Empire backend API.
+This file documents the root JavaScript foundation service. The separate EPDG TypeScript route surface and frontend compatibility status are controlled by [BACKEND_ROUTE_AUDIT.md](BACKEND_ROUTE_AUDIT.md). The authoritative Railway service/root mapping is not yet proven, and no deployment is implied by this inventory.
 
 ## Health
 
@@ -30,7 +30,7 @@ Example response:
 
 Purpose: receives public Agency booking inquiries.
 
-Public: yes, write-only.
+Public: mounted as a write-only route, but fail-closed with `503` unless `AGENCY_MODULE_ENABLED` is explicitly `true`. Do not enable it until the authoritative service, schema, recipient/intake workflow, and production CORS origin are confirmed.
 
 Required request fields:
 
@@ -62,36 +62,15 @@ Privacy rule: do not collect or store sensitive documents through this route.
 
 ### `POST /api/epdg/deliverable-submissions`
 
-Purpose: receives EPDG deliverable submissions.
+Status: unavailable (`503`) on the root foundation service because it has no authentication or ownership checks. EPDG core submission writes also remain `503` until the authoritative deployment target and private storage ownership/delivery contract are confirmed.
 
-Public: internal/form-based MVP route. Authentication should be added before sensitive usage.
-
-Required request fields:
-
-```json
-{
-  "taskId": 1,
-  "placementId": 1,
-  "internId": 1,
-  "fileUrl": "https://example.com/proof"
-}
-```
-
-Optional request fields:
-
-```json
-{
-  "fileName": "Week 10 Proof",
-  "fileSizeKb": 125,
-  "notes": "Submitted for review."
-}
-```
+No request-body contract is active. The service intentionally does not accept caller-supplied identity, placement, task, or file ownership values on this unauthenticated route.
 
 ### `POST /api/epdg/portfolio-evidence`
 
 Purpose: future portfolio evidence endpoint.
 
-Status: placeholder until the final Supabase table is confirmed.
+Status: not implemented (`501`) until the final table and authorization contract are confirmed.
 
 ## Public Contributions
 
@@ -99,7 +78,7 @@ Status: placeholder until the final Supabase table is confirmed.
 
 Purpose: returns public-safe intern contribution records only.
 
-Public: yes.
+Public: mounted, but fail-closed with `503` unless `PUBLIC_CREDITS_ENABLED` is explicitly `true`.
 
 Data rule: only show public/approved/consented records. The current route reads `epdg.career_files` where `is_public = true` and joins approved public-facing profile metadata.
 
@@ -109,9 +88,20 @@ Data rule: only show public/approved/consented records. The current route reads 
 
 Purpose: verifies issued certificates by certificate number.
 
-Public: yes.
+Public: mounted, but fail-closed with `503` unless `CERTIFICATE_VERIFICATION_ENABLED` is explicitly `true`.
 
 Response should not expose private intern notes, internal reviewer comments, or database IDs.
+
+## Routes not mounted on this service
+
+- `POST /api/signup`
+- `/api/auth/*`
+- `/api/admin/*`
+- `/api/intern/*`
+- `/api/mentor/*`
+- `/api/portfolio/*`
+
+Do not treat a `404` from these paths as evidence that the EPDG TypeScript service is healthy; it may indicate that Railway is running the root foundation entrypoint instead.
 
 ## Routes intentionally not public
 

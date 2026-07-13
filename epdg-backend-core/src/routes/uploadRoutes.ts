@@ -1,16 +1,16 @@
 import { Router } from 'express';
-import multer from 'multer';
-import { uploadCV } from '../controllers/UploadController';
+import { uploadLimiter } from '../middlewares/security';
 
 const router = Router();
 
-// Store in memory (no temp files on disk)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits:  { fileSize: 5 * 1024 * 1024 }, // 5 MB
+// Anonymous service-role uploads cannot be tied to the eventual account owner.
+// Keep this route fail-closed until a private, ownership-verifiable flow exists.
+router.post('/cv', uploadLimiter, (_req, res) => {
+  res.status(503).json({
+    success: false,
+    message: 'CV upload is temporarily unavailable.',
+    errors: [],
+  });
 });
-
-// POST /api/upload/cv  — public (called before account creation)
-router.post('/cv', upload.single('file'), uploadCV);
 
 export default router;

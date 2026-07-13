@@ -29,7 +29,7 @@ function isValidEmail(value) {
 }
 
 function moduleEnabled(envKey) {
-  return process.env[envKey] !== 'false';
+  return process.env[envKey] === 'true';
 }
 
 module.exports = {

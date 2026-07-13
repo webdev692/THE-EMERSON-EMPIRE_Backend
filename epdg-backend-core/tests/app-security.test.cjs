@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const { after, before, test } = require('node:test');
 const jwt = require('jsonwebtoken');
 
@@ -44,6 +45,13 @@ test('health returns a privacy-safe database-ready response', async () => {
     service: 'epdg-backend-core',
     status: 'ok',
   });
+});
+
+test('startup diagnostics identify only the failing stage and error type', () => {
+  const source = readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8');
+  assert.match(source, /stage:\s*'environment'\s*\|\s*'database'\s*\|\s*'application'/);
+  assert.match(source, /logger\.error\('Backend startup failed',\s*\{\s*stage,\s*errorType:/s);
+  assert.doesNotMatch(source, /logger\.error\('Backend startup failed',\s*error\s*\)/);
 });
 
 test('protected route namespaces reject unauthenticated requests with 401', async () => {
